@@ -1,0 +1,41 @@
+# Python cache and build artefacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local app/runtime output
+artifacts/
+exports/
+*.xlsx
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and local environment files
+*.log
+.env
+.env.*
+
+# Claude Code
+.claude/
+
+# PSN data — never commit raw history or credentials
+*.json
+*.csv
