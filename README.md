@@ -105,3 +105,8 @@ python -m pytest tests/ -v
 - Python 3.11+
 - Playwright Chromium (`playwright install chromium`)
 - A PlayStation Network account (any region)
+
+## Backlog
+
+- Auto-detect when user has completed sign-in via the browser, instead of requiring manual confirmation. Include a setting to turn on manual confirmation as a fallback.
+- Support fetching transactions for a user-specified date range (start date and/or end date), not just full account history.

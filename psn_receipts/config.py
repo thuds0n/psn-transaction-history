@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".psn-receipts" / "config.json"
+DEFAULT_LOCALE = "en-us"
 
-_DEFAULTS: dict = {"locale": "en-us"}
+_DEFAULTS: dict = {"locale": DEFAULT_LOCALE}
 
 # Full locale codes used in PS Store URLs (store.playstation.com/{locale}/)
 # Format: {language}-{country} — both parts matter for non-English stores
@@ -35,6 +36,10 @@ def load() -> dict:
     if CONFIG_FILE.exists():
         return {**_DEFAULTS, **json.loads(CONFIG_FILE.read_text())}
     return dict(_DEFAULTS)
+
+
+def get_locale() -> str:
+    return load()["locale"]
 
 
 def save(data: dict) -> None:
