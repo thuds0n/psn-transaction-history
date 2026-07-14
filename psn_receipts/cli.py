@@ -2,6 +2,7 @@ import typer
 from typing import Optional
 
 from psn_receipts import config as cfg
+from psn_receipts.errors import PSNReceiptsError
 
 app = typer.Typer(help="Export your PlayStation Network transaction history.")
 
@@ -22,12 +23,16 @@ def login(
 ) -> None:
     """Open a browser and save your PSN session for future commands."""
     from psn_receipts.auth import login as _login
-    _login(force=force, debug=debug, locale=locale)
+    try:
+        _login(force=force, debug=debug, locale=locale)
+    except PSNReceiptsError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 @app.command()
 def fetch(
-    output: str = typer.Option("psn_history_full.json", "--output", help="Path to save raw JSON."),
+    output: str = typer.Option("psn_transactions.json", "--output", help="Path to save raw JSON."),
     limit: Optional[int] = typer.Option(
         None, "--limit",
         help="Max pages to fetch (1 page ≈ 100 transactions). Useful for testing.",
@@ -35,12 +40,16 @@ def fetch(
 ) -> None:
     """Fetch transaction history from PSN and save to JSON."""
     from psn_receipts.fetch import fetch_all
-    fetch_all(output_path=output, limit=limit)
+    try:
+        fetch_all(output_path=output, limit=limit)
+    except (FileNotFoundError, PSNReceiptsError) as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 @app.command()
 def export(
-    input: str = typer.Option("psn_history_full.json", "--input", help="Path to raw JSON from fetch."),
+    input: str = typer.Option("psn_transactions.json", "--input", help="Path to raw JSON from fetch."),
     csv: str = typer.Option("psn_history_enriched.csv", "--csv", help="Path for output CSV."),
     enrich: bool = typer.Option(False, "--enrich", help="Look up SKUs on PS Store to classify content type."),
 ) -> None:

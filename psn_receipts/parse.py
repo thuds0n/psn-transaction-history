@@ -17,7 +17,7 @@ _CHIHIRO_TEMPLATE = "https://store.playstation.com/store/api/chihiro/00_09_000/c
 
 
 def _chihiro_url(sku_base: str) -> str:
-    locale = cfg.load().get("locale", "en-au")
+    locale = cfg.get_locale()
     country, lang = cfg.locale_parts(locale)
     return _CHIHIRO_TEMPLATE.format(country=country, lang=lang, sku=sku_base)
 
@@ -198,7 +198,7 @@ def _flatten(txs: list, cache: dict, enrich: bool) -> list:
 # ---------------------------------------------------------------------------
 
 def export(
-    json_path: str = "psn_history_full.json",
+    json_path: str = "psn_transactions.json",
     csv_path: str = "psn_history_enriched.csv",
     enrich: bool = False,
 ) -> None:
