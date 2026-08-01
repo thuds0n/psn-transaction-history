@@ -9,8 +9,8 @@ Works with all major PSN regions (default US).
 ## Install
 
 ```bash
-pip install -e .
-playwright install chromium
+python3 -m pip install -e .
+python3 -m playwright install chromium
 ```
 
 ## Usage
@@ -39,7 +39,7 @@ The locale is saved to `~/.psn-receipts/config.json` and reused automatically by
 psn-receipts fetch
 ```
 
-Downloads all transactions to `psn_history_full.json`. For testing, limit to one page (100 transactions):
+Downloads all transactions to `psn_transactions.json`. For testing, limit to one page (100 transactions):
 
 ```bash
 psn-receipts fetch --limit 1
@@ -96,14 +96,14 @@ SKU lookups are cached in `~/.psn-receipts/sku_cache.json`.
 ## Development
 
 ```bash
-pip install -e .
-python -m pytest tests/ -v
+python3 -m pip install -e '.[dev]'
+python3 -m pytest tests/ -v
 ```
 
 ## Requirements
 
 - Python 3.11+
-- Playwright Chromium (`playwright install chromium`)
+- Playwright Chromium (`python3 -m playwright install chromium`)
 - A PlayStation Network account (any region)
 
 ## Backlog

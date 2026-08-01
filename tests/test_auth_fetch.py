@@ -2,8 +2,11 @@ import builtins
 import json
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
+from typer.testing import CliRunner
 
 from psn_receipts import auth, config as cfg, fetch, parse
+from psn_receipts.cli import app
 from psn_receipts.errors import PSNReceiptsError
 
 
@@ -22,13 +25,28 @@ def success_result(transactions):
     }
 
 
+class FakeResponse:
+    def __init__(self, status=200):
+        self.status = status
+
+
 class FakePage:
-    def __init__(self, evaluate_results=None):
+    def __init__(self, evaluate_results=None, goto_results=None, body=""):
         self.evaluate_results = list(evaluate_results or [])
+        self.goto_results = list(goto_results or [])
+        self.body = body
         self.goto_calls = []
 
     def goto(self, url):
         self.goto_calls.append(url)
+        result = self.goto_results.pop(0) if self.goto_results else FakeResponse()
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def text_content(self, selector):
+        assert selector == "body"
+        return self.body
 
     def evaluate(self, script, payload):
         result = self.evaluate_results.pop(0)
@@ -192,7 +210,7 @@ def test_fetch_helper_raises_on_malformed_response():
 
 
 def test_fetch_helper_raises_on_page_evaluate_failure():
-    page = FakePage([RuntimeError("page crashed")])
+    page = FakePage([PlaywrightError("page crashed")])
 
     with pytest.raises(PSNReceiptsError, match="page crashed"):
         fetch._fetch_transaction_history_page(page, "2025-01-01T00:00:00.000Z")
@@ -214,23 +232,17 @@ def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "input", lambda _: "")
     monkeypatch.setattr(auth.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
     monkeypatch.setattr(auth.cfg, "save", lambda data: saved.append(data))
-    monkeypatch.setattr(auth, "_current_end_date", lambda: "2025-01-01T00:00:00.000Z")
+    def fake_validate(page_arg):
+        validated.append(page_arg)
 
-    def fake_validate(page_arg, end_date):
-        validated.append((page_arg, end_date))
-        return []
-
-    monkeypatch.setattr(auth, "_fetch_transaction_history_page", fake_validate)
+    monkeypatch.setattr(auth, "_validate_authenticated_session", fake_validate)
 
     auth.login()
 
-    assert validated == [(page, "2025-01-01T00:00:00.000Z")]
+    assert validated == [page]
     assert context.storage_state_calls == [str(auth_file)]
     assert saved == [{"locale": cfg.DEFAULT_LOCALE}]
-    assert page.goto_calls == [
-        cfg.store_url(cfg.DEFAULT_LOCALE),
-        cfg.store_url(cfg.DEFAULT_LOCALE),
-    ]
+    assert page.goto_calls == [cfg.store_url(cfg.DEFAULT_LOCALE)]
     assert browser.closed is True
 
 
@@ -251,9 +263,9 @@ def test_auth_login_does_not_save_unauthenticated_session(tmp_path, monkeypatch)
     monkeypatch.setattr(auth.cfg, "save", lambda data: saved.append(data))
     monkeypatch.setattr(
         auth,
-        "_fetch_transaction_history_page",
-        lambda page_arg, end_date: (_ for _ in ()).throw(
-            PSNReceiptsError("PlayStation Store rejected the saved session (HTTP 401 Unauthorized).")
+        "_validate_authenticated_session",
+        lambda page_arg: (_ for _ in ()).throw(
+            PSNReceiptsError("Sony rejected the browser session (HTTP 401).")
         ),
     )
 
@@ -276,6 +288,183 @@ def test_auth_existing_session_reports_shared_default_locale(tmp_path, monkeypat
 
     output = capsys.readouterr().out
     assert f"Current locale: {cfg.DEFAULT_LOCALE}" in output
+
+
+def test_auth_validation_uses_sony_identity_endpoint_not_transactions():
+    page = FakePage(
+        goto_results=[FakeResponse(200)],
+        body=json.dumps({"npsso": "authenticated-session-token"}),
+    )
+
+    auth._validate_authenticated_session(page)
+
+    assert page.goto_calls == [auth.AUTH_VALIDATION_URL]
+    assert page.evaluate_results == []
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "message"),
+    [
+        (401, "", "rejected the browser session"),
+        (200, json.dumps({"error": "not signed in"}), "did not confirm"),
+        (200, "not-json", "unexpected response"),
+    ],
+)
+def test_auth_validation_rejects_unconfirmed_sessions(status, body, message):
+    page = FakePage(goto_results=[FakeResponse(status)], body=body)
+
+    with pytest.raises(PSNReceiptsError, match=message):
+        auth._validate_authenticated_session(page)
+
+
+def test_auth_validation_converts_navigation_failure():
+    page = FakePage(goto_results=[PlaywrightError("page was closed")])
+
+    with pytest.raises(PSNReceiptsError, match="session-validation endpoint"):
+        auth._validate_authenticated_session(page)
+
+
+def test_login_converts_browser_launch_failure():
+    class FailingChromium:
+        def launch(self, **kwargs):
+            raise PlaywrightError("browser executable is missing")
+
+    class FailingPlaywright:
+        chromium = FailingChromium()
+
+    with pytest.raises(PSNReceiptsError, match="Could not launch Chrome, Edge") as exc_info:
+        auth._launch_browser(FailingPlaywright())
+
+    assert "python3 -m playwright install chromium" in str(exc_info.value)
+
+
+def test_login_converts_storage_state_save_failure(tmp_path, monkeypatch):
+    auth_dir = tmp_path / ".psn-receipts"
+    auth_file = auth_dir / "auth.json"
+    page = FakePage()
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    saved = []
+
+    def fail_storage_state(path):
+        raise PlaywrightError("permission denied")
+
+    context.storage_state = fail_storage_state
+    monkeypatch.setattr(auth, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(auth, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(auth, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(auth, "_launch_browser", lambda p: (browser, "Chromium"))
+    monkeypatch.setattr(auth, "_validate_authenticated_session", lambda page_arg: None)
+    monkeypatch.setattr(builtins, "input", lambda _: "")
+    monkeypatch.setattr(auth.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+    monkeypatch.setattr(auth.cfg, "save", lambda data: saved.append(data))
+
+    with pytest.raises(PSNReceiptsError, match="Could not save the browser session"):
+        auth.login()
+
+    assert saved == []
+    assert browser.closed is True
+
+
+def test_fetch_all_converts_saved_state_failure(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("not valid storage state")
+    browser = FakeBrowser(FakeContext(FakePage()))
+
+    def fail_new_context(**kwargs):
+        raise PlaywrightError("storage state is malformed")
+
+    browser.new_context = fail_new_context
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+
+    with pytest.raises(PSNReceiptsError, match="Could not load the saved browser session"):
+        fetch.fetch_all(output_path=str(tmp_path / "output.json"))
+
+    assert browser.closed is True
+
+
+def test_fetch_all_converts_store_navigation_failure(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}")
+    output_path = tmp_path / "output.json"
+    page = FakePage(goto_results=[PlaywrightError("net::ERR_NAME_NOT_RESOLVED")])
+    browser = FakeBrowser(FakeContext(page))
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+
+    with pytest.raises(PSNReceiptsError, match="Could not navigate to PlayStation Store"):
+        fetch.fetch_all(output_path=str(output_path))
+
+    assert browser.closed is True
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("transaction", "message"),
+    [
+        ({"id": "TX001"}, "no valid `date` string"),
+        ({"id": "TX001", "date": "yesterday"}, "malformed date"),
+        ({"id": "TX001", "date": "2025-01-15T10:00:00"}, "malformed date"),
+        ("not-an-object", "not an object"),
+    ],
+)
+def test_pagination_rejects_malformed_transaction_dates(transaction, message):
+    with pytest.raises(PSNReceiptsError, match=message):
+        fetch._pagination_end_date(transaction, page_number=2)
+
+
+def test_pagination_normalises_valid_timestamp_to_utc():
+    assert fetch._pagination_end_date(
+        {"id": "TX001", "date": "2025-01-15T10:00:00.000+10:00"},
+        page_number=1,
+    ) == "2025-01-14T23:59:59.999Z"
+
+
+def test_fetch_all_does_not_write_output_for_malformed_pagination_date(
+    tmp_path, monkeypatch
+):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}")
+    output_path = tmp_path / "output.json"
+    page = FakePage([success_result([{"id": "TX001", "date": "invalid"}])])
+    browser = FakeBrowser(FakeContext(page))
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+
+    with pytest.raises(PSNReceiptsError, match="transaction 'TX001' has malformed date"):
+        fetch.fetch_all(output_path=str(output_path))
+
+    assert browser.closed is True
+    assert not output_path.exists()
+
+
+def test_fetch_cli_prints_expected_failure(monkeypatch):
+    def fail_fetch(**kwargs):
+        raise PSNReceiptsError("Could not load the saved browser session.")
+
+    monkeypatch.setattr(fetch, "fetch_all", fail_fetch)
+
+    result = CliRunner().invoke(app, ["fetch"])
+
+    assert result.exit_code == 1
+    assert "Could not load the saved browser session." in result.output
+
+
+def test_login_cli_prints_expected_failure(monkeypatch):
+    def fail_login(**kwargs):
+        raise PSNReceiptsError("Could not launch Playwright Chromium.")
+
+    monkeypatch.setattr(auth, "login", fail_login)
+
+    result = CliRunner().invoke(app, ["login"])
+
+    assert result.exit_code == 1
+    assert "Could not launch Playwright Chromium." in result.output
 
 
 def test_config_and_parse_share_default_locale(tmp_path, monkeypatch):
