@@ -16,6 +16,9 @@ dependencies = [
     "rich",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.scripts]
 psn-receipts = "psn_receipts.cli:app"
 

@@ -1,9 +1,11 @@
 import json
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -74,6 +76,9 @@ console = Console()
 
 def _subtract_1ms(iso: str) -> str:
     dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError("timestamp has no timezone")
+    dt = dt.astimezone(timezone.utc)
     dt -= timedelta(milliseconds=1)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
@@ -108,7 +113,7 @@ def _format_graphql_errors(errors: Any) -> str:
 def _fetch_transaction_history_page(page, end_date: str) -> list[dict]:
     try:
         result = page.evaluate(_JS_FETCH, {"endDate": end_date})
-    except Exception as exc:
+    except PlaywrightError as exc:
         raise PSNReceiptsError(
             f"Failed to query PlayStation transaction history: {exc}"
         ) from exc
@@ -183,6 +188,30 @@ def _fetch_transaction_history_page(page, end_date: str) -> list[dict]:
     return transactions
 
 
+def _pagination_end_date(transaction: Any, page_number: int) -> str:
+    if not isinstance(transaction, dict):
+        raise PSNReceiptsError(
+            f"Cannot paginate after page {page_number}: its final transaction is not an object."
+        )
+
+    transaction_date = transaction.get("date")
+    if not isinstance(transaction_date, str) or not transaction_date.strip():
+        raise PSNReceiptsError(
+            f"Cannot paginate after page {page_number}: its final transaction has no valid "
+            "`date` string."
+        )
+
+    try:
+        return _subtract_1ms(transaction_date)
+    except (TypeError, ValueError) as exc:
+        transaction_id = transaction.get("id")
+        record_label = f" {transaction_id!r}" if transaction_id is not None else ""
+        raise PSNReceiptsError(
+            f"Cannot paginate after page {page_number}: transaction{record_label} has malformed "
+            f"date {transaction_date!r}; expected an ISO 8601 timestamp with a timezone."
+        ) from exc
+
+
 def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> list:
     """Fetch full transaction history using saved session. limit= caps page count (for testing)."""
     if not AUTH_FILE.exists():
@@ -193,44 +222,90 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
     all_tx = []
     end_date = _current_end_date()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=str(AUTH_FILE))
-        page = context.new_page()
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                raise PSNReceiptsError(
+                    "Could not launch Playwright Chromium for fetching. Install it with "
+                    "`python3 -m playwright install chromium` and try again. "
+                    f"Playwright reported: {exc}"
+                ) from exc
 
-        store_url = cfg.store_url(cfg.get_locale())
-        console.print(f"Navigating to PlayStation Store ({store_url})...")
-        page.goto(store_url)
+            try:
+                try:
+                    context = browser.new_context(storage_state=str(AUTH_FILE))
+                except PlaywrightError as exc:
+                    raise PSNReceiptsError(
+                        f"Could not load the saved browser session from {AUTH_FILE}. It may be "
+                        "invalid or damaged; run `psn-receipts login --force` to replace it. "
+                        f"Playwright reported: {exc}"
+                    ) from exc
+                try:
+                    page = context.new_page()
+                except PlaywrightError as exc:
+                    raise PSNReceiptsError(
+                        "Could not open a browser page for fetching. "
+                        f"Playwright reported: {exc}"
+                    ) from exc
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("Fetching transactions...", total=None)
-            page_num = 0
+                store_url = cfg.store_url(cfg.get_locale())
+                console.print(f"Navigating to PlayStation Store ({store_url})...")
+                try:
+                    page.goto(store_url)
+                except PlaywrightError as exc:
+                    raise PSNReceiptsError(
+                        "Could not navigate to PlayStation Store before fetching. Check your "
+                        f"network connection and try again. Playwright reported: {exc}"
+                    ) from exc
 
-            while True:
-                txs = _fetch_transaction_history_page(page, end_date)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                    transient=True,
+                ) as progress:
+                    task = progress.add_task("Fetching transactions...", total=None)
+                    page_num = 0
 
-                if not txs:
-                    break
+                    while True:
+                        txs = _fetch_transaction_history_page(page, end_date)
 
-                all_tx.extend(txs)
-                page_num += 1
-                progress.update(
-                    task,
-                    description=f"Fetched {len(all_tx)} transactions (page {page_num})...",
-                )
+                        if not txs:
+                            break
 
-                if limit is not None and page_num >= limit:
-                    break
+                        all_tx.extend(txs)
+                        page_num += 1
+                        progress.update(
+                            task,
+                            description=(
+                                f"Fetched {len(all_tx)} transactions (page {page_num})..."
+                            ),
+                        )
 
-                end_date = _subtract_1ms(txs[-1]["date"])
-                time.sleep(0.3)
+                        if limit is not None and page_num >= limit:
+                            break
 
-        browser.close()
+                        end_date = _pagination_end_date(txs[-1], page_num)
+                        time.sleep(0.3)
+            finally:
+                active_error = sys.exc_info()[0] is not None
+                try:
+                    browser.close()
+                except PlaywrightError as exc:
+                    if not active_error:
+                        raise PSNReceiptsError(
+                            "Fetching completed, but the browser could not be closed cleanly. "
+                            f"Playwright reported: {exc}"
+                        ) from exc
+    except PSNReceiptsError:
+        raise
+    except PlaywrightError as exc:
+        raise PSNReceiptsError(
+            "Could not start Playwright for fetching. "
+            f"Playwright reported: {exc}"
+        ) from exc
 
     Path(output_path).write_text(json.dumps(all_tx, indent=2))
     console.print(f"✓ Saved [bold]{len(all_tx)}[/bold] transactions to {output_path}")
