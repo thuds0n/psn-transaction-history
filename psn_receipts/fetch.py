@@ -12,6 +12,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from psn_receipts import config as cfg
 from psn_receipts.errors import PSNReceiptsError
+from psn_receipts.storage import atomic_write_json, secure_auth_file
 
 AUTH_FILE = Path.home() / ".psn-receipts" / "auth.json"
 GRAPHQL_HASH = "076aae24f704a963a06287c26e69f79afce2ea74ed7535109a15600577c6c479"
@@ -218,6 +219,7 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
         raise FileNotFoundError(
             f"No auth session at {AUTH_FILE}. Run: psn-receipts login"
         )
+    secure_auth_file(AUTH_FILE)
 
     all_tx = []
     end_date = _current_end_date()
@@ -287,7 +289,14 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
                         if limit is not None and page_num >= limit:
                             break
 
-                        end_date = _pagination_end_date(txs[-1], page_num)
+                        next_end_date = _pagination_end_date(txs[-1], page_num)
+                        if next_end_date >= end_date:
+                            raise PSNReceiptsError(
+                                f"Pagination did not advance after page {page_num}: Sony "
+                                f"returned final transaction date {txs[-1]['date']!r} again. "
+                                "No output was written."
+                            )
+                        end_date = next_end_date
                         time.sleep(0.3)
             finally:
                 active_error = sys.exc_info()[0] is not None
@@ -307,6 +316,7 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
             f"Playwright reported: {exc}"
         ) from exc
 
-    Path(output_path).write_text(json.dumps(all_tx, indent=2))
+    output_file = Path(output_path)
+    atomic_write_json(output_file, all_tx)
     console.print(f"✓ Saved [bold]{len(all_tx)}[/bold] transactions to {output_path}")
     return all_tx
