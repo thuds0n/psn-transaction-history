@@ -21,11 +21,11 @@ python3 -m playwright install chromium
 psn-receipts login
 ```
 
-A browser window opens (system Chrome with passkey support if available; Chromium as fallback). Sign in to PlayStation Store, complete any 2FA, then press **ENTER** in the terminal. Your session is saved to `~/.psn-receipts/auth.json`.
+A browser window opens (system Chrome with passkey support if available; Chromium as fallback). Sign in to PlayStation Store, complete any 2FA, then press **ENTER** in the terminal. Your session is saved to `~/.psn-receipts/auth.json` with owner-only permissions.
 
 ```bash
 psn-receipts login --force              # re-authenticate
-psn-receipts login --debug              # also print session cookies
+psn-receipts login --debug              # report session-cookie presence; values stay redacted
 psn-receipts login --locale en-au       # set region (default: en-us)
 ```
 
@@ -39,7 +39,7 @@ The locale is saved to `~/.psn-receipts/config.json` and reused automatically by
 psn-receipts fetch
 ```
 
-Downloads all transactions to `psn_transactions.json`. For testing, limit to one page (100 transactions):
+Downloads all transactions to `psn_transactions.json`. The completed export replaces any existing file atomically, so a failed fetch leaves the previous export intact. For testing, limit to one page (100 transactions):
 
 ```bash
 psn-receipts fetch --limit 1

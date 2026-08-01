@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
@@ -7,6 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from psn_receipts import config as cfg
 from psn_receipts.errors import PSNReceiptsError
+from psn_receipts.storage import secure_auth_directory, secure_auth_file
 
 AUTH_DIR = Path.home() / ".psn-receipts"
 AUTH_FILE = AUTH_DIR / "auth.json"
@@ -83,13 +86,42 @@ def _validate_authenticated_session(page) -> None:
         )
 
 
+def _save_storage_state(context) -> None:
+    temporary_path = None
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".auth.", suffix=".json", dir=AUTH_DIR
+        )
+        os.close(file_descriptor)
+        temporary_path = Path(temporary_name)
+        context.storage_state(path=str(temporary_path))
+        temporary_path.chmod(0o600)
+        os.replace(temporary_path, AUTH_FILE)
+    except PlaywrightError as exc:
+        raise PSNReceiptsError(
+            f"Could not save the browser session to {AUTH_FILE}. "
+            f"Playwright reported: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise PSNReceiptsError(
+            f"Could not save the browser session securely to {AUTH_FILE}: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
     if AUTH_FILE.exists() and not force:
+        secure_auth_file(AUTH_FILE)
         print(f"Already logged in ({AUTH_FILE}). Use --force to re-authenticate.")
         print(f"Current locale: {cfg.get_locale()}")
         return
 
-    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    secure_auth_directory(AUTH_DIR)
 
     locale = locale or cfg.get_locale()
     url = cfg.store_url(locale)
@@ -136,12 +168,9 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                         ) from exc
                     found = [c for c in cookies if c["name"] in DEBUG_COOKIES]
                     if found:
-                        print("\nCookies:")
+                        print("\nExpected cookies present (values redacted):")
                         for cookie in found:
-                            preview = cookie["value"][:40] + (
-                                "..." if len(cookie["value"]) > 40 else ""
-                            )
-                            print(f"  {cookie['name']}: {preview}")
+                            print(f"  {cookie['name']}: present")
                     else:
                         print("  (none of the expected cookies found — are you signed in?)")
 
@@ -155,14 +184,15 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                         "`psn-receipts login --force` again."
                     ) from exc
 
+                _save_storage_state(context)
+                secure_auth_file(AUTH_FILE)
                 try:
-                    context.storage_state(path=str(AUTH_FILE))
-                except PlaywrightError as exc:
+                    cfg.save({"locale": locale})
+                except PSNReceiptsError as exc:
                     raise PSNReceiptsError(
-                        f"Could not save the browser session to {AUTH_FILE}. "
-                        f"Playwright reported: {exc}"
+                        f"The session was saved, but the locale configuration could not be "
+                        f"updated: {exc}"
                     ) from exc
-                cfg.save({"locale": locale})
                 print(f"\n✓ Session saved to {AUTH_FILE}")
                 print(f"✓ Locale set to {locale}")
             finally:

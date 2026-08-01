@@ -3,6 +3,9 @@
 import json
 from pathlib import Path
 
+from psn_receipts.errors import PSNReceiptsError
+from psn_receipts.storage import atomic_write_json
+
 CONFIG_FILE = Path.home() / ".psn-receipts" / "config.json"
 DEFAULT_LOCALE = "en-us"
 
@@ -34,7 +37,17 @@ SUPPORTED_LOCALES = [
 
 def load() -> dict:
     if CONFIG_FILE.exists():
-        return {**_DEFAULTS, **json.loads(CONFIG_FILE.read_text())}
+        try:
+            saved = json.loads(CONFIG_FILE.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PSNReceiptsError(
+                f"Could not read configuration from {CONFIG_FILE}: {exc}"
+            ) from exc
+        if not isinstance(saved, dict):
+            raise PSNReceiptsError(
+                f"Configuration at {CONFIG_FILE} must contain a JSON object."
+            )
+        return {**_DEFAULTS, **saved}
     return dict(_DEFAULTS)
 
 
@@ -43,10 +56,15 @@ def get_locale() -> str:
 
 
 def save(data: dict) -> None:
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PSNReceiptsError(
+            f"Could not create the configuration directory {CONFIG_FILE.parent}: {exc}"
+        ) from exc
     existing = load()
     existing.update(data)
-    CONFIG_FILE.write_text(json.dumps(existing, indent=2))
+    atomic_write_json(CONFIG_FILE, existing, description="configuration")
 
 
 def locale_parts(locale: str) -> tuple[str, str]:

@@ -1,11 +1,13 @@
 import builtins
 import json
+import stat
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 from typer.testing import CliRunner
 
-from psn_receipts import auth, config as cfg, fetch, parse
+from psn_receipts import auth, config as cfg, fetch, parse, storage
 from psn_receipts.cli import app
 from psn_receipts.errors import PSNReceiptsError
 
@@ -240,8 +242,12 @@ def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
     auth.login()
 
     assert validated == [page]
-    assert context.storage_state_calls == [str(auth_file)]
+    assert len(context.storage_state_calls) == 1
+    assert context.storage_state_calls[0] != str(auth_file)
+    assert Path(context.storage_state_calls[0]).parent == auth_dir
     assert saved == [{"locale": cfg.DEFAULT_LOCALE}]
+    assert stat.S_IMODE(auth_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
     assert page.goto_calls == [cfg.store_url(cfg.DEFAULT_LOCALE)]
     assert browser.closed is True
 
@@ -277,6 +283,38 @@ def test_auth_login_does_not_save_unauthenticated_session(tmp_path, monkeypatch)
     assert browser.closed is True
 
 
+def test_auth_debug_output_never_discloses_cookie_values(
+    tmp_path, monkeypatch, capsys
+):
+    auth_dir = tmp_path / ".psn-receipts"
+    auth_file = auth_dir / "auth.json"
+    page = FakePage()
+    context = FakeContext(page)
+    context.cookies_result = [
+        {"name": "npsso", "value": "super-secret-npsso-value"},
+        {"name": "JSESSIONID", "value": "another-secret-value"},
+    ]
+    browser = FakeBrowser(context)
+
+    monkeypatch.setattr(auth, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(auth, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(auth, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(auth, "_launch_browser", lambda p: (browser, "Chromium"))
+    monkeypatch.setattr(auth, "_validate_authenticated_session", lambda page_arg: None)
+    monkeypatch.setattr(builtins, "input", lambda _: "")
+    monkeypatch.setattr(auth.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+    monkeypatch.setattr(auth.cfg, "save", lambda data: None)
+
+    auth.login(debug=True)
+
+    output = capsys.readouterr().out
+    assert "npsso: present" in output
+    assert "JSESSIONID: present" in output
+    assert "values redacted" in output
+    assert "super-secret-npsso-value" not in output
+    assert "another-secret-value" not in output
+
+
 def test_auth_existing_session_reports_shared_default_locale(tmp_path, monkeypatch, capsys):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text("{}")
@@ -288,6 +326,8 @@ def test_auth_existing_session_reports_shared_default_locale(tmp_path, monkeypat
 
     output = capsys.readouterr().out
     assert f"Current locale: {cfg.DEFAULT_LOCALE}" in output
+    assert stat.S_IMODE(auth_file.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
 def test_auth_validation_uses_sony_identity_endpoint_not_transactions():
@@ -402,6 +442,35 @@ def test_fetch_all_converts_store_navigation_failure(tmp_path, monkeypatch):
     assert not output_path.exists()
 
 
+def test_fetch_restricts_legacy_auth_file_permissions(tmp_path, monkeypatch):
+    auth_directory = tmp_path / ".psn-receipts"
+    auth_directory.mkdir(mode=0o755)
+    auth_file = auth_directory / "auth.json"
+    auth_file.write_text("{}")
+    auth_file.chmod(0o644)
+    output_path = tmp_path / "empty.json"
+    browser = FakeBrowser(FakeContext(FakePage([success_result([])])))
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+
+    fetch.fetch_all(output_path=str(output_path))
+
+    assert stat.S_IMODE(auth_directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+
+
+def test_auth_security_rejects_symlinked_session_file(tmp_path):
+    real_auth_file = tmp_path / "real-auth.json"
+    real_auth_file.write_text("{}")
+    linked_auth_file = tmp_path / "auth.json"
+    linked_auth_file.symlink_to(real_auth_file)
+
+    with pytest.raises(PSNReceiptsError, match="must be a regular file"):
+        storage.secure_auth_file(linked_auth_file)
+
+
 @pytest.mark.parametrize(
     ("transaction", "message"),
     [
@@ -443,6 +512,47 @@ def test_fetch_all_does_not_write_output_for_malformed_pagination_date(
     assert not output_path.exists()
 
 
+def test_fetch_stops_when_pagination_boundary_repeats(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}")
+    output_path = tmp_path / "output.json"
+    repeated_page = [
+        {"id": "TX001", "date": "2025-01-15T10:00:00.000Z"}
+    ]
+    page = FakePage(
+        [success_result(repeated_page), success_result(repeated_page)]
+    )
+    browser = FakeBrowser(FakeContext(page))
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(fetch, "_current_end_date", lambda: "2025-01-15T10:00:01.000Z")
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+
+    with pytest.raises(PSNReceiptsError, match="Pagination did not advance"):
+        fetch.fetch_all(output_path=str(output_path))
+
+    assert browser.closed is True
+    assert not output_path.exists()
+
+
+def test_atomic_output_failure_preserves_existing_export(tmp_path, monkeypatch):
+    output_path = tmp_path / "transactions.json"
+    output_path.write_text("existing export")
+
+    def fail_replace(source, destination):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(storage.os, "replace", fail_replace)
+
+    with pytest.raises(PSNReceiptsError, match="Could not save transaction JSON"):
+        storage.atomic_write_json(output_path, [{"id": "TX001"}])
+
+    assert output_path.read_text() == "existing export"
+    assert list(tmp_path.glob(".transactions.json.*.tmp")) == []
+
+
 def test_fetch_cli_prints_expected_failure(monkeypatch):
     def fail_fetch(**kwargs):
         raise PSNReceiptsError("Could not load the saved browser session.")
@@ -477,3 +587,12 @@ def test_config_and_parse_share_default_locale(tmp_path, monkeypatch):
         "https://store.playstation.com/store/api/chihiro/00_09_000/container/US/en/999/"
         "UP0001-CUSA00001_00-GAME"
     )
+
+
+def test_config_reports_malformed_json_as_user_facing_error(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.json"
+    config_file.write_text("not-json")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", config_file)
+
+    with pytest.raises(PSNReceiptsError, match="Could not read configuration"):
+        cfg.load()

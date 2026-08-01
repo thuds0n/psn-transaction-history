@@ -10,7 +10,11 @@ app = typer.Typer(help="Export your PlayStation Network transaction history.")
 @app.command()
 def login(
     force: bool = typer.Option(False, "--force", help="Re-authenticate even if session exists."),
-    debug: bool = typer.Option(False, "--debug", help="Print key session cookies after login."),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Report key session cookies after login (values are always redacted).",
+    ),
     locale: str = typer.Option(
         None,
         "--locale",
