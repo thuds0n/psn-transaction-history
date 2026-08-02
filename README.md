@@ -27,13 +27,17 @@ Run `source .venv/bin/activate` again when returning to the project in a new ter
 psn-transactions login
 ```
 
-A browser window opens (system Chrome with passkey support if available; Chromium as fallback). Sign in to PlayStation Store, complete any 2FA, then press **ENTER** in the terminal. Your session is saved to `~/.psn-transactions/auth.json` with owner-only permissions.
+A browser window opens (system Chrome with passkey support if available; Chromium as fallback). Sign in to PlayStation Store and complete any 2FA. The command detects successful sign-in automatically, validates the session with Sony, and saves it to `~/.psn-transactions/auth.json` with owner-only permissions. Keep the browser window open until the command finishes.
 
 ```bash
 psn-transactions login --force              # re-authenticate
 psn-transactions login --debug              # report session-cookie presence; values stay redacted
 psn-transactions login --locale en-au       # set region (default: en-us)
+psn-transactions login --manual-confirmation # press ENTER after signing in instead
 ```
+
+Automatic detection waits for up to five minutes. Use `--manual-confirmation`
+if Sony's login flow is not detected automatically.
 
 Supported locales: `en-us` `en-gb` `en-au` `en-ca` `de-de` `fr-fr` `es-es` `it-it` `nl-nl` `pt-pt` `ja-jp` `ko-kr` `pt-br` `es-mx`
 
@@ -137,7 +141,3 @@ python -m pytest tests/ -v
 - Python 3.11+
 - Playwright Chromium (`python -m playwright install chromium` inside the virtual environment)
 - A PlayStation Network account (any region)
-
-## Backlog
-
-- Auto-detect when user has completed sign-in via the browser, instead of requiring manual confirmation. Include a setting to turn on manual confirmation as a fallback.

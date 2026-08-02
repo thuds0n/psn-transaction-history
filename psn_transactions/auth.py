@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
@@ -17,6 +18,8 @@ AUTH_FILE = AUTH_DIR / "auth.json"
 AUTH_VALIDATION_URL = "https://ca.account.sony.com/api/v1/ssocookie"
 
 DEBUG_COOKIES = {"npsso", "JSESSIONID", "isSignedIn", "_abck"}
+SIGN_IN_TIMEOUT_SECONDS = 300
+SIGN_IN_POLL_INTERVAL_SECONDS = 0.5
 
 
 def _launch_browser(p):
@@ -87,6 +90,47 @@ def _validate_authenticated_session(page) -> None:
         )
 
 
+def _wait_for_sign_in(
+    context,
+    timeout: float = SIGN_IN_TIMEOUT_SECONDS,
+    poll_interval: float = SIGN_IN_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Wait until Sony identity and Store cookies confirm completed sign-in."""
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            cookies = context.cookies()
+        except PlaywrightError as exc:
+            raise PSNTransactionsError(
+                "Could not monitor the browser for sign-in completion. Keep the browser "
+                f"window open while signing in. Playwright reported: {exc}"
+            ) from exc
+
+        cookie_values = {
+            cookie.get("name"): cookie.get("value")
+            for cookie in cookies
+            if isinstance(cookie, dict)
+        }
+        npsso = cookie_values.get("npsso")
+        is_signed_in = cookie_values.get("isSignedIn")
+        if (
+            isinstance(npsso, str)
+            and npsso.strip()
+            and isinstance(is_signed_in, str)
+            and is_signed_in.strip().lower() == "true"
+        ):
+            return
+
+        if time.monotonic() >= deadline:
+            raise PSNTransactionsError(
+                f"Sign-in was not detected within {int(timeout)} seconds. "
+                "Try again with `psn-transactions login --force --manual-confirmation`."
+            )
+
+        time.sleep(poll_interval)
+
+
 def _save_storage_state(context) -> None:
     temporary_path = None
     try:
@@ -115,7 +159,12 @@ def _save_storage_state(context) -> None:
                 pass
 
 
-def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
+def login(
+    force: bool = False,
+    debug: bool = False,
+    locale: str = None,
+    manual_confirmation: bool = False,
+) -> None:
     if AUTH_FILE.exists() and not force:
         secure_auth_file(AUTH_FILE)
         print(f"Already logged in ({AUTH_FILE}). Use --force to re-authenticate.")
@@ -156,8 +205,16 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                     ) from exc
 
                 print("Sign in to PlayStation Store in the browser window.")
-                print("Complete any 2FA if prompted, then return here.")
-                input("Press ENTER once you are signed in... ")
+                print("Complete any 2FA if prompted and keep the browser window open.")
+                if manual_confirmation:
+                    input("Press ENTER once you are signed in... ")
+                else:
+                    print(
+                        "Waiting for sign-in to complete automatically "
+                        f"(up to {SIGN_IN_TIMEOUT_SECONDS // 60} minutes)..."
+                    )
+                    _wait_for_sign_in(context)
+                    print("✓ Sign-in detected automatically.")
 
                 if debug:
                     try:
