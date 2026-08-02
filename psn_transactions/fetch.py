@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import requests
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 from rich.console import Console
@@ -19,36 +20,39 @@ from psn_transactions.storage import atomic_write_json, secure_auth_file
 
 AUTH_FILE = app_dir() / "auth.json"
 GRAPHQL_HASH = "076aae24f704a963a06287c26e69f79afce2ea74ed7535109a15600577c6c479"
+GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
+GRAPHQL_HEADERS = {
+    "content-type": "application/json",
+    "x-apollo-operation-name": "transactionHistoryRetrieve",
+    "apollo-require-preflight": "true",
+    "apollographql-client-name": "@sie-ppr-web-checkout/app",
+    "apollographql-client-version": "2.169.1",
+    "x-psn-app-ver": "@sie-ppr-web-checkout/app/v2.169.1",
+    "x-psn-storefront-type": "checkout:store",
+}
+SUPPORTED_TRANSPORTS = {"browser", "http"}
+HTTP_TIMEOUT_SECONDS = 30
 DEFAULT_START_DATE = "1994-12-03T00:00:00.000Z"
 
 # Runs inside the browser page to avoid CORS/CSRF issues
 _JS_FETCH = """
-async ({startDate, endDate}) => {
-    const HASH = "076aae24f704a963a06287c26e69f79afce2ea74ed7535109a15600577c6c479";
+async ({startDate, endDate, url, hash, headers}) => {
     const vars = JSON.stringify({
         startDate,
         endDate,
         limit: 100
     });
     const ext = JSON.stringify({
-        persistedQuery: {version: 1, sha256Hash: HASH}
+        persistedQuery: {version: 1, sha256Hash: hash}
     });
-    const url = "https://web.np.playstation.com/api/graphql/v1/op"
+    const requestUrl = url
         + "?operationName=transactionHistoryRetrieve"
         + "&variables=" + encodeURIComponent(vars)
         + "&extensions=" + encodeURIComponent(ext);
     try {
-        const res = await fetch(url, {
+        const res = await fetch(requestUrl, {
             credentials: "include",
-            headers: {
-                "content-type": "application/json",
-                "x-apollo-operation-name": "transactionHistoryRetrieve",
-                "apollo-require-preflight": "true",
-                "apollographql-client-name": "@sie-ppr-web-checkout/app",
-                "apollographql-client-version": "2.169.1",
-                "x-psn-app-ver": "@sie-ppr-web-checkout/app/v2.169.1",
-                "x-psn-storefront-type": "checkout:store"
-            }
+            headers
         });
         const rawBody = await res.text();
         let body = null;
@@ -193,22 +197,10 @@ def _format_graphql_errors(errors: Any) -> str:
     return "; ".join(messages) if messages else "unknown GraphQL error"
 
 
-def _fetch_transaction_history_page(
-    page, end_date: str, start_date: str = DEFAULT_START_DATE
-) -> list[dict]:
-    try:
-        result = page.evaluate(
-            _JS_FETCH,
-            {"startDate": start_date, "endDate": end_date},
-        )
-    except PlaywrightError as exc:
-        raise PSNTransactionsError(
-            f"Failed to query PlayStation transaction history: {exc}"
-        ) from exc
-
+def _extract_transactions(result: Any, transport: str = "browser") -> list[dict]:
     if not isinstance(result, dict):
         raise PSNTransactionsError(
-            "PlayStation transaction history returned an unexpected browser response."
+            "PlayStation transaction history returned an unexpected transport response."
         )
 
     if result.get("requestError"):
@@ -230,6 +222,13 @@ def _fetch_transaction_history_page(
         if status_text:
             status_label = f"{status_label} {status_text}"
         if status in {401, 403}:
+            if transport == "http":
+                raise PSNTransactionsError(
+                    f"PlayStation Store rejected the direct HTTP request ({status_label}). "
+                    "Retry with `psn-transactions fetch --transport browser`. If the browser "
+                    "transport is also rejected, sign in again with "
+                    "`psn-transactions login --force`."
+                )
             raise PSNTransactionsError(
                 f"PlayStation Store rejected the saved session ({status_label}). "
                 "Please sign in again with `psn-transactions login --force`."
@@ -241,10 +240,13 @@ def _fetch_transaction_history_page(
     if result.get("parseError"):
         raw_body = result.get("rawBody") or ""
         snippet = f" Response started with: {raw_body!r}" if raw_body else ""
-        raise PSNTransactionsError(
+        message = (
             "PlayStation transaction history returned a non-JSON response."
             f"{snippet}"
         )
+        if transport == "http":
+            message += " Retry with `psn-transactions fetch --transport browser`."
+        raise PSNTransactionsError(message)
 
     payload = result.get("body")
     if not isinstance(payload, dict):
@@ -254,10 +256,13 @@ def _fetch_transaction_history_page(
 
     graphql_errors = payload.get("errors")
     if graphql_errors:
-        raise PSNTransactionsError(
+        message = (
             "PlayStation transaction history returned GraphQL errors: "
             f"{_format_graphql_errors(graphql_errors)}"
         )
+        if transport == "http":
+            message += " Retry with `psn-transactions fetch --transport browser`."
+        raise PSNTransactionsError(message)
 
     try:
         transactions = payload["data"]["transactionHistoryRetrieve"]["transactions"]
@@ -274,6 +279,121 @@ def _fetch_transaction_history_page(
         )
 
     return transactions
+
+
+def _fetch_transaction_history_page(
+    page, end_date: str, start_date: str = DEFAULT_START_DATE
+) -> list[dict]:
+    """Fetch one page through an authenticated Playwright browser page."""
+    try:
+        result = page.evaluate(
+            _JS_FETCH,
+            {
+                "startDate": start_date,
+                "endDate": end_date,
+                "url": GRAPHQL_URL,
+                "hash": GRAPHQL_HASH,
+                "headers": GRAPHQL_HEADERS,
+            },
+        )
+    except PlaywrightError as exc:
+        raise PSNTransactionsError(
+            f"Failed to query PlayStation transaction history: {exc}"
+        ) from exc
+
+    return _extract_transactions(result, transport="browser")
+
+
+def _graphql_params(start_date: str, end_date: str) -> dict[str, str]:
+    return {
+        "operationName": "transactionHistoryRetrieve",
+        "variables": json.dumps(
+            {"startDate": start_date, "endDate": end_date, "limit": 100},
+            separators=(",", ":"),
+        ),
+        "extensions": json.dumps(
+            {"persistedQuery": {"version": 1, "sha256Hash": GRAPHQL_HASH}},
+            separators=(",", ":"),
+        ),
+    }
+
+
+def _fetch_transaction_history_page_http(
+    session: requests.Session,
+    end_date: str,
+    start_date: str = DEFAULT_START_DATE,
+) -> list[dict]:
+    """Fetch one page directly over HTTP using the saved browser cookies."""
+    try:
+        response = session.get(
+            GRAPHQL_URL,
+            params=_graphql_params(start_date, end_date),
+            headers=GRAPHQL_HEADERS,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        raise PSNTransactionsError(
+            "PlayStation transaction request failed before the API returned a response: "
+            f"{exc}."
+        ) from exc
+
+    raw_body = response.text
+    try:
+        body = response.json() if raw_body else None
+        parse_error = None
+    except ValueError as exc:
+        body = None
+        parse_error = str(exc)
+
+    return _extract_transactions(
+        {
+            "ok": response.ok,
+            "status": response.status_code,
+            "statusText": response.reason,
+            "body": body,
+            "rawBody": raw_body[:500],
+            "parseError": parse_error,
+        },
+        transport="http",
+    )
+
+
+def _populate_http_session(session: requests.Session) -> None:
+    try:
+        storage_state = json.loads(AUTH_FILE.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PSNTransactionsError(
+            f"Could not load the saved browser session from {AUTH_FILE}. It may be "
+            "invalid or damaged; run `psn-transactions login --force` to replace it."
+        ) from exc
+
+    cookies = storage_state.get("cookies") if isinstance(storage_state, dict) else None
+    if not isinstance(cookies, list):
+        raise PSNTransactionsError(
+            f"Could not load the saved browser session from {AUTH_FILE}. It has an "
+            "unexpected cookie format; run `psn-transactions login --force` to replace it."
+        )
+
+    try:
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                raise TypeError("cookie entry is not an object")
+            options = {
+                "path": cookie.get("path") or "/",
+                "secure": bool(cookie.get("secure", False)),
+            }
+            domain = cookie.get("domain")
+            if isinstance(domain, str) and domain:
+                options["domain"] = domain
+            expires = cookie.get("expires")
+            if isinstance(expires, (int, float)) and expires > 0:
+                options["expires"] = int(expires)
+            session.cookies.set(cookie["name"], cookie["value"], **options)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PSNTransactionsError(
+            f"Could not load cookies from the saved browser session at {AUTH_FILE}. "
+            "Run `psn-transactions login --force` to replace it."
+        ) from exc
 
 
 def _pagination_end_date(transaction: Any, page_number: int) -> str:
@@ -300,44 +420,79 @@ def _pagination_end_date(transaction: Any, page_number: int) -> str:
         ) from exc
 
 
-def fetch_all(
-    output_path: str = "psn_transactions.json",
-    limit: int | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    timezone_name: str | None = None,
+def _fetch_pages(
+    fetch_page,
+    start_timestamp: str,
+    end_timestamp: str,
+    limit: int | None,
 ) -> list:
-    """Fetch transaction history using optional date bounds in the selected timezone."""
-    start_timestamp, end_timestamp, resolved_timezone_name = _resolve_date_range(
-        start_date,
-        end_date,
-        timezone_name,
-    )
-
-    if not AUTH_FILE.exists():
-        raise FileNotFoundError(
-            f"No auth session at {AUTH_FILE}. Run: psn-transactions login"
-        )
-    secure_auth_file(AUTH_FILE)
-
     all_tx = []
     page_end_date = end_timestamp
 
-    if start_date is not None or end_date is not None:
-        console.print(
-            f"Interpreting date range in [bold]{resolved_timezone_name}[/bold]."
-        )
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Fetching transactions...", total=None)
+        page_num = 0
+
+        while True:
+            txs = fetch_page(page_end_date)
+
+            if not txs:
+                break
+
+            all_tx.extend(txs)
+            page_num += 1
+            progress.update(
+                task,
+                description=f"Fetched {len(all_tx)} transactions (page {page_num})...",
+            )
+
+            if limit is not None and page_num >= limit:
+                break
+
+            next_end_date = _pagination_end_date(txs[-1], page_num)
+            if next_end_date >= page_end_date:
+                raise PSNTransactionsError(
+                    f"Pagination did not advance after page {page_num}: Sony "
+                    f"returned final transaction date {txs[-1]['date']!r} again. "
+                    "No output was written."
+                )
+            if next_end_date < start_timestamp:
+                break
+            page_end_date = next_end_date
+            time.sleep(0.3)
+
+    return all_tx
+
+
+def _launch_fetch_browser(p):
+    for channel in ("chrome", "msedge"):
+        try:
+            return p.chromium.launch(channel=channel, headless=True)
+        except PlaywrightError:
+            pass
 
     try:
+        return p.chromium.launch(headless=True)
+    except PlaywrightError as exc:
+        raise PSNTransactionsError(
+            "Could not launch Chrome, Edge, or Playwright Chromium for fetching. "
+            "Install Chrome or add the fallback with "
+            "`python3 -m playwright install chromium`, then try again. "
+            f"Playwright reported: {exc}"
+        ) from exc
+
+
+def _fetch_with_browser(
+    start_timestamp: str, end_timestamp: str, limit: int | None
+) -> list:
+    try:
         with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(headless=True)
-            except PlaywrightError as exc:
-                raise PSNTransactionsError(
-                    "Could not launch Playwright Chromium for fetching. Install it with "
-                    "`python3 -m playwright install chromium` and try again. "
-                    f"Playwright reported: {exc}"
-                ) from exc
+            browser = _launch_fetch_browser(p)
 
             try:
                 try:
@@ -366,48 +521,16 @@ def fetch_all(
                         f"network connection and try again. Playwright reported: {exc}"
                     ) from exc
 
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    console=console,
-                    transient=True,
-                ) as progress:
-                    task = progress.add_task("Fetching transactions...", total=None)
-                    page_num = 0
-
-                    while True:
-                        txs = _fetch_transaction_history_page(
-                            page,
-                            page_end_date,
-                            start_timestamp,
-                        )
-
-                        if not txs:
-                            break
-
-                        all_tx.extend(txs)
-                        page_num += 1
-                        progress.update(
-                            task,
-                            description=(
-                                f"Fetched {len(all_tx)} transactions (page {page_num})..."
-                            ),
-                        )
-
-                        if limit is not None and page_num >= limit:
-                            break
-
-                        next_end_date = _pagination_end_date(txs[-1], page_num)
-                        if next_end_date >= page_end_date:
-                            raise PSNTransactionsError(
-                                f"Pagination did not advance after page {page_num}: Sony "
-                                f"returned final transaction date {txs[-1]['date']!r} again. "
-                                "No output was written."
-                            )
-                        if next_end_date < start_timestamp:
-                            break
-                        page_end_date = next_end_date
-                        time.sleep(0.3)
+                return _fetch_pages(
+                    lambda page_end_date: _fetch_transaction_history_page(
+                        page,
+                        page_end_date,
+                        start_timestamp,
+                    ),
+                    start_timestamp,
+                    end_timestamp,
+                    limit,
+                )
             finally:
                 active_error = sys.exc_info()[0] is not None
                 try:
@@ -425,6 +548,62 @@ def fetch_all(
             "Could not start Playwright for fetching. "
             f"Playwright reported: {exc}"
         ) from exc
+
+
+def _fetch_with_http(
+    start_timestamp: str, end_timestamp: str, limit: int | None
+) -> list:
+    with requests.Session() as session:
+        _populate_http_session(session)
+        return _fetch_pages(
+            lambda page_end_date: _fetch_transaction_history_page_http(
+                session,
+                page_end_date,
+                start_timestamp,
+            ),
+            start_timestamp,
+            end_timestamp,
+            limit,
+        )
+
+
+def fetch_all(
+    output_path: str = "psn_transactions.json",
+    limit: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    timezone_name: str | None = None,
+    transport: str = "http",
+) -> list:
+    """Fetch transaction history using the selected transport and optional date bounds."""
+    if transport not in SUPPORTED_TRANSPORTS:
+        supported = ", ".join(sorted(SUPPORTED_TRANSPORTS))
+        raise PSNTransactionsError(
+            f"Unknown fetch transport {transport!r}; expected one of: {supported}."
+        )
+
+    start_timestamp, end_timestamp, resolved_timezone_name = _resolve_date_range(
+        start_date,
+        end_date,
+        timezone_name,
+    )
+
+    if not AUTH_FILE.exists():
+        raise FileNotFoundError(
+            f"No auth session at {AUTH_FILE}. Run: psn-transactions login"
+        )
+    secure_auth_file(AUTH_FILE)
+
+    if start_date is not None or end_date is not None:
+        console.print(
+            f"Interpreting date range in [bold]{resolved_timezone_name}[/bold]."
+        )
+    console.print(f"Using [bold]{transport}[/bold] fetch transport.")
+
+    if transport == "http":
+        all_tx = _fetch_with_http(start_timestamp, end_timestamp, limit)
+    else:
+        all_tx = _fetch_with_browser(start_timestamp, end_timestamp, limit)
 
     output_file = Path(output_path)
     atomic_write_json(output_file, all_tx)

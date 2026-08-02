@@ -14,8 +14,11 @@ Create a project-local virtual environment so `python` and installed commands co
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-python -m playwright install chromium
 ```
+
+System Chrome or Edge is used for login. If neither is installed, add
+Playwright's Chromium fallback with `python -m playwright install chromium`;
+passkeys and biometric login are unavailable in that fallback browser.
 
 Run `source .venv/bin/activate` again when returning to the project in a new terminal. The `.venv/` directory is ignored by Git.
 
@@ -55,6 +58,19 @@ Downloads all transactions to `psn_transactions.json`. The completed export repl
 psn-transactions fetch --limit 1
 psn-transactions fetch --output my_transactions.json
 ```
+
+Fetching uses direct HTTP by default, reusing the same securely saved session
+without launching a browser. The Playwright browser transport remains available
+as a fallback:
+
+```bash
+psn-transactions fetch --transport http     # explicit default
+psn-transactions fetch --transport browser  # fallback
+```
+
+Use the browser transport if Sony rejects the direct request. Interactive login
+still uses system Chrome so passkeys, biometric authentication, and 2FA remain
+available.
 
 To fetch an inclusive date range, provide a start date, an end date, or both:
 
@@ -139,5 +155,5 @@ python -m pytest tests/ -v
 ## Requirements
 
 - Python 3.11+
-- Playwright Chromium (`python -m playwright install chromium` inside the virtual environment)
+- System Chrome or Edge for passkey-capable login, or Playwright Chromium as a fallback
 - A PlayStation Network account (any region)
