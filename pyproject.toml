@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "psn-receipts"
+name = "psn-transactions"
 version = "0.1.0"
-description = "Export your PlayStation Store transaction history"
+description = "Export your complete PlayStation Network transaction history"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -20,10 +20,10 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [project.scripts]
-psn-receipts = "psn_receipts.cli:app"
+psn-transactions = "psn_transactions.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["psn_receipts*"]
+include = ["psn_transactions*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

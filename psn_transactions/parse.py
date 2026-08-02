@@ -10,9 +10,10 @@ import requests
 from rich.console import Console
 from rich.progress import Progress, BarColumn, SpinnerColumn, TextColumn, TaskProgressColumn
 
-from psn_receipts import config as cfg
+from psn_transactions import config as cfg
+from psn_transactions.paths import app_dir
 
-SKU_CACHE_FILE = Path.home() / ".psn-receipts" / "sku_cache.json"
+SKU_CACHE_FILE = app_dir() / "sku_cache.json"
 _CHIHIRO_TEMPLATE = "https://store.playstation.com/store/api/chihiro/00_09_000/container/{country}/{lang}/999/{sku}"
 
 
@@ -199,7 +200,7 @@ def _flatten(txs: list, cache: dict, enrich: bool) -> list:
 
 def export(
     json_path: str = "psn_transactions.json",
-    csv_path: str = "psn_history_enriched.csv",
+    csv_path: str = "psn_transactions.csv",
     enrich: bool = False,
 ) -> None:
     txs = json.loads(Path(json_path).read_text())

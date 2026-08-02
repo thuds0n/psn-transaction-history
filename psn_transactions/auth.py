@@ -7,11 +7,12 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-from psn_receipts import config as cfg
-from psn_receipts.errors import PSNReceiptsError
-from psn_receipts.storage import secure_auth_directory, secure_auth_file
+from psn_transactions import config as cfg
+from psn_transactions.errors import PSNTransactionsError
+from psn_transactions.paths import app_dir
+from psn_transactions.storage import secure_auth_directory, secure_auth_file
 
-AUTH_DIR = Path.home() / ".psn-receipts"
+AUTH_DIR = app_dir()
 AUTH_FILE = AUTH_DIR / "auth.json"
 AUTH_VALIDATION_URL = "https://ca.account.sony.com/api/v1/ssocookie"
 
@@ -38,7 +39,7 @@ def _launch_browser(p):
     try:
         browser = p.chromium.launch(headless=False)
     except PlaywrightError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Could not launch Chrome, Edge, or Playwright Chromium. "
             "Install the browser with `python3 -m playwright install chromium` "
             f"and try again. Playwright reported: {exc}"
@@ -52,22 +53,22 @@ def _validate_authenticated_session(page) -> None:
         response = page.goto(AUTH_VALIDATION_URL)
         body = page.text_content("body")
     except PlaywrightError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Could not contact Sony's session-validation endpoint. "
             f"Playwright reported: {exc}"
         ) from exc
 
     if response is None:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Sony's session-validation endpoint did not return a response."
         )
 
     if response.status in {401, 403}:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Sony rejected the browser session (HTTP {response.status})."
         )
     if response.status >= 400:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Sony's session-validation endpoint failed "
             f"(HTTP {response.status})."
         )
@@ -75,13 +76,13 @@ def _validate_authenticated_session(page) -> None:
     try:
         payload = json.loads(body or "")
     except (json.JSONDecodeError, TypeError) as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Sony's session-validation endpoint returned an unexpected response."
         ) from exc
 
     npsso = payload.get("npsso") if isinstance(payload, dict) else None
     if not isinstance(npsso, str) or not npsso.strip():
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Sony did not confirm an authenticated PlayStation Network session."
         )
 
@@ -98,12 +99,12 @@ def _save_storage_state(context) -> None:
         temporary_path.chmod(0o600)
         os.replace(temporary_path, AUTH_FILE)
     except PlaywrightError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Could not save the browser session to {AUTH_FILE}. "
             f"Playwright reported: {exc}"
         ) from exc
     except OSError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Could not save the browser session securely to {AUTH_FILE}: {exc}"
         ) from exc
     finally:
@@ -133,14 +134,14 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                 try:
                     context = browser.new_context()
                 except PlaywrightError as exc:
-                    raise PSNReceiptsError(
+                    raise PSNTransactionsError(
                         "Could not create a browser context for sign-in. "
                         f"Playwright reported: {exc}"
                     ) from exc
                 try:
                     page = context.new_page()
                 except PlaywrightError as exc:
-                    raise PSNReceiptsError(
+                    raise PSNTransactionsError(
                         "Could not open a browser page for sign-in. "
                         f"Playwright reported: {exc}"
                     ) from exc
@@ -149,7 +150,7 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                 try:
                     page.goto(url)
                 except PlaywrightError as exc:
-                    raise PSNReceiptsError(
+                    raise PSNTransactionsError(
                         "Could not navigate to PlayStation Store for sign-in. "
                         f"Playwright reported: {exc}"
                     ) from exc
@@ -162,7 +163,7 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                     try:
                         cookies = context.cookies()
                     except PlaywrightError as exc:
-                        raise PSNReceiptsError(
+                        raise PSNTransactionsError(
                             "Could not inspect the browser session. "
                             f"Playwright reported: {exc}"
                         ) from exc
@@ -177,19 +178,19 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                 print("\nValidating signed-in session...")
                 try:
                     _validate_authenticated_session(page)
-                except PSNReceiptsError as exc:
-                    raise PSNReceiptsError(
+                except PSNTransactionsError as exc:
+                    raise PSNTransactionsError(
                         f"Sign-in validation failed: {exc}\n"
                         "Your session was not saved. Complete sign-in in the browser and try "
-                        "`psn-receipts login --force` again."
+                        "`psn-transactions login --force` again."
                     ) from exc
 
                 _save_storage_state(context)
                 secure_auth_file(AUTH_FILE)
                 try:
                     cfg.save({"locale": locale})
-                except PSNReceiptsError as exc:
-                    raise PSNReceiptsError(
+                except PSNTransactionsError as exc:
+                    raise PSNTransactionsError(
                         f"The session was saved, but the locale configuration could not be "
                         f"updated: {exc}"
                     ) from exc
@@ -201,14 +202,14 @@ def login(force: bool = False, debug: bool = False, locale: str = None) -> None:
                     browser.close()
                 except PlaywrightError as exc:
                     if not active_error:
-                        raise PSNReceiptsError(
+                        raise PSNTransactionsError(
                             "The browser session completed, but the browser could not be "
                             f"closed cleanly. Playwright reported: {exc}"
                         ) from exc
-    except PSNReceiptsError:
+    except PSNTransactionsError:
         raise
     except PlaywrightError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             "Could not start Playwright for sign-in. "
             f"Playwright reported: {exc}"
         ) from exc

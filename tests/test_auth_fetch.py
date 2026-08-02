@@ -7,9 +7,9 @@ import pytest
 from playwright.sync_api import Error as PlaywrightError
 from typer.testing import CliRunner
 
-from psn_receipts import auth, config as cfg, fetch, parse, storage
-from psn_receipts.cli import app
-from psn_receipts.errors import PSNReceiptsError
+from psn_transactions import auth, config as cfg, fetch, parse, storage
+from psn_transactions.cli import app
+from psn_transactions.errors import PSNTransactionsError
 
 
 def success_result(transactions):
@@ -173,7 +173,7 @@ def test_fetch_all_does_not_write_partial_output_on_failure(tmp_path, monkeypatc
     monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    with pytest.raises(PSNReceiptsError, match="GraphQL errors"):
+    with pytest.raises(PSNTransactionsError, match="GraphQL errors"):
         fetch.fetch_all(output_path=str(output_path))
 
     assert not output_path.exists()
@@ -191,7 +191,7 @@ def test_fetch_helper_raises_on_graphql_errors():
         ]
     )
 
-    with pytest.raises(PSNReceiptsError, match="UNAUTHENTICATED"):
+    with pytest.raises(PSNTransactionsError, match="UNAUTHENTICATED"):
         fetch._fetch_transaction_history_page(page, "2025-01-01T00:00:00.000Z")
 
 
@@ -207,19 +207,19 @@ def test_fetch_helper_raises_on_malformed_response():
         ]
     )
 
-    with pytest.raises(PSNReceiptsError, match="unexpected response shape"):
+    with pytest.raises(PSNTransactionsError, match="unexpected response shape"):
         fetch._fetch_transaction_history_page(page, "2025-01-01T00:00:00.000Z")
 
 
 def test_fetch_helper_raises_on_page_evaluate_failure():
     page = FakePage([PlaywrightError("page crashed")])
 
-    with pytest.raises(PSNReceiptsError, match="page crashed"):
+    with pytest.raises(PSNTransactionsError, match="page crashed"):
         fetch._fetch_transaction_history_page(page, "2025-01-01T00:00:00.000Z")
 
 
 def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
-    auth_dir = tmp_path / ".psn-receipts"
+    auth_dir = tmp_path / ".psn-transactions"
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
@@ -253,7 +253,7 @@ def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
 
 
 def test_auth_login_does_not_save_unauthenticated_session(tmp_path, monkeypatch):
-    auth_dir = tmp_path / ".psn-receipts"
+    auth_dir = tmp_path / ".psn-transactions"
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
@@ -271,11 +271,11 @@ def test_auth_login_does_not_save_unauthenticated_session(tmp_path, monkeypatch)
         auth,
         "_validate_authenticated_session",
         lambda page_arg: (_ for _ in ()).throw(
-            PSNReceiptsError("Sony rejected the browser session (HTTP 401).")
+            PSNTransactionsError("Sony rejected the browser session (HTTP 401).")
         ),
     )
 
-    with pytest.raises(PSNReceiptsError, match="session was not saved"):
+    with pytest.raises(PSNTransactionsError, match="session was not saved"):
         auth.login()
 
     assert context.storage_state_calls == []
@@ -286,7 +286,7 @@ def test_auth_login_does_not_save_unauthenticated_session(tmp_path, monkeypatch)
 def test_auth_debug_output_never_discloses_cookie_values(
     tmp_path, monkeypatch, capsys
 ):
-    auth_dir = tmp_path / ".psn-receipts"
+    auth_dir = tmp_path / ".psn-transactions"
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
@@ -353,14 +353,14 @@ def test_auth_validation_uses_sony_identity_endpoint_not_transactions():
 def test_auth_validation_rejects_unconfirmed_sessions(status, body, message):
     page = FakePage(goto_results=[FakeResponse(status)], body=body)
 
-    with pytest.raises(PSNReceiptsError, match=message):
+    with pytest.raises(PSNTransactionsError, match=message):
         auth._validate_authenticated_session(page)
 
 
 def test_auth_validation_converts_navigation_failure():
     page = FakePage(goto_results=[PlaywrightError("page was closed")])
 
-    with pytest.raises(PSNReceiptsError, match="session-validation endpoint"):
+    with pytest.raises(PSNTransactionsError, match="session-validation endpoint"):
         auth._validate_authenticated_session(page)
 
 
@@ -372,14 +372,14 @@ def test_login_converts_browser_launch_failure():
     class FailingPlaywright:
         chromium = FailingChromium()
 
-    with pytest.raises(PSNReceiptsError, match="Could not launch Chrome, Edge") as exc_info:
+    with pytest.raises(PSNTransactionsError, match="Could not launch Chrome, Edge") as exc_info:
         auth._launch_browser(FailingPlaywright())
 
     assert "python3 -m playwright install chromium" in str(exc_info.value)
 
 
 def test_login_converts_storage_state_save_failure(tmp_path, monkeypatch):
-    auth_dir = tmp_path / ".psn-receipts"
+    auth_dir = tmp_path / ".psn-transactions"
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
@@ -399,7 +399,7 @@ def test_login_converts_storage_state_save_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(auth.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
     monkeypatch.setattr(auth.cfg, "save", lambda data: saved.append(data))
 
-    with pytest.raises(PSNReceiptsError, match="Could not save the browser session"):
+    with pytest.raises(PSNTransactionsError, match="Could not save the browser session"):
         auth.login()
 
     assert saved == []
@@ -418,7 +418,7 @@ def test_fetch_all_converts_saved_state_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
     monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
 
-    with pytest.raises(PSNReceiptsError, match="Could not load the saved browser session"):
+    with pytest.raises(PSNTransactionsError, match="Could not load the saved browser session"):
         fetch.fetch_all(output_path=str(tmp_path / "output.json"))
 
     assert browser.closed is True
@@ -435,7 +435,7 @@ def test_fetch_all_converts_store_navigation_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    with pytest.raises(PSNReceiptsError, match="Could not navigate to PlayStation Store"):
+    with pytest.raises(PSNTransactionsError, match="Could not navigate to PlayStation Store"):
         fetch.fetch_all(output_path=str(output_path))
 
     assert browser.closed is True
@@ -443,7 +443,7 @@ def test_fetch_all_converts_store_navigation_failure(tmp_path, monkeypatch):
 
 
 def test_fetch_restricts_legacy_auth_file_permissions(tmp_path, monkeypatch):
-    auth_directory = tmp_path / ".psn-receipts"
+    auth_directory = tmp_path / ".psn-transactions"
     auth_directory.mkdir(mode=0o755)
     auth_file = auth_directory / "auth.json"
     auth_file.write_text("{}")
@@ -467,7 +467,7 @@ def test_auth_security_rejects_symlinked_session_file(tmp_path):
     linked_auth_file = tmp_path / "auth.json"
     linked_auth_file.symlink_to(real_auth_file)
 
-    with pytest.raises(PSNReceiptsError, match="must be a regular file"):
+    with pytest.raises(PSNTransactionsError, match="must be a regular file"):
         storage.secure_auth_file(linked_auth_file)
 
 
@@ -481,7 +481,7 @@ def test_auth_security_rejects_symlinked_session_file(tmp_path):
     ],
 )
 def test_pagination_rejects_malformed_transaction_dates(transaction, message):
-    with pytest.raises(PSNReceiptsError, match=message):
+    with pytest.raises(PSNTransactionsError, match=message):
         fetch._pagination_end_date(transaction, page_number=2)
 
 
@@ -505,7 +505,7 @@ def test_fetch_all_does_not_write_output_for_malformed_pagination_date(
     monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    with pytest.raises(PSNReceiptsError, match="transaction 'TX001' has malformed date"):
+    with pytest.raises(PSNTransactionsError, match="transaction 'TX001' has malformed date"):
         fetch.fetch_all(output_path=str(output_path))
 
     assert browser.closed is True
@@ -530,7 +530,7 @@ def test_fetch_stops_when_pagination_boundary_repeats(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    with pytest.raises(PSNReceiptsError, match="Pagination did not advance"):
+    with pytest.raises(PSNTransactionsError, match="Pagination did not advance"):
         fetch.fetch_all(output_path=str(output_path))
 
     assert browser.closed is True
@@ -546,7 +546,7 @@ def test_atomic_output_failure_preserves_existing_export(tmp_path, monkeypatch):
 
     monkeypatch.setattr(storage.os, "replace", fail_replace)
 
-    with pytest.raises(PSNReceiptsError, match="Could not save transaction JSON"):
+    with pytest.raises(PSNTransactionsError, match="Could not save transaction JSON"):
         storage.atomic_write_json(output_path, [{"id": "TX001"}])
 
     assert output_path.read_text() == "existing export"
@@ -555,7 +555,7 @@ def test_atomic_output_failure_preserves_existing_export(tmp_path, monkeypatch):
 
 def test_fetch_cli_prints_expected_failure(monkeypatch):
     def fail_fetch(**kwargs):
-        raise PSNReceiptsError("Could not load the saved browser session.")
+        raise PSNTransactionsError("Could not load the saved browser session.")
 
     monkeypatch.setattr(fetch, "fetch_all", fail_fetch)
 
@@ -567,7 +567,7 @@ def test_fetch_cli_prints_expected_failure(monkeypatch):
 
 def test_login_cli_prints_expected_failure(monkeypatch):
     def fail_login(**kwargs):
-        raise PSNReceiptsError("Could not launch Playwright Chromium.")
+        raise PSNTransactionsError("Could not launch Playwright Chromium.")
 
     monkeypatch.setattr(auth, "login", fail_login)
 
@@ -594,5 +594,5 @@ def test_config_reports_malformed_json_as_user_facing_error(tmp_path, monkeypatc
     config_file.write_text("not-json")
     monkeypatch.setattr(cfg, "CONFIG_FILE", config_file)
 
-    with pytest.raises(PSNReceiptsError, match="Could not read configuration"):
+    with pytest.raises(PSNTransactionsError, match="Could not read configuration"):
         cfg.load()

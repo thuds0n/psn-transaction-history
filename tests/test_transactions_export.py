@@ -1,8 +1,8 @@
-"""Tests for psn_receipts parsing and classification logic."""
+"""Tests for PSN transaction parsing and classification logic."""
 
 import pytest
 
-from psn_receipts.parse import _classify, _flatten, _sku_base, CSV_FIELDS
+from psn_transactions.parse import _classify, _flatten, _sku_base, CSV_FIELDS
 
 
 # ---------------------------------------------------------------------------
