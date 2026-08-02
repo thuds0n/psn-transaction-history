@@ -15,6 +15,7 @@ dependencies = [
     "requests",
     "rich",
     "tzlocal>=5.0",
+    "urllib3>=2",
 ]
 
 [project.optional-dependencies]

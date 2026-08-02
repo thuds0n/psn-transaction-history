@@ -97,7 +97,7 @@ on the timezone configured on the machine running the command.
 
 ```bash
 psn-transactions export                   # basic export, no classification
-psn-transactions export --enrich          # also classify each item via PS Store API
+psn-transactions export --enrich          # add PS Store metadata and classification
 psn-transactions export --enrich --csv enriched_transactions.csv
 ```
 
@@ -121,29 +121,65 @@ The completed CSV replaces any existing file atomically.
 
 ### With `--enrich`
 
-Running `psn-transactions export --enrich` looks up each SKU against the PS Store API to classify your purchases. The following columns are always present in the CSV but are empty without `--enrich`:
+Running `psn-transactions export --enrich` looks up each unique SKU against the
+PS Store API and reports how many records came from the cache, succeeded, were
+not found, lacked useful metadata, or failed temporarily. The following columns
+are always present in the CSV but are empty without `--enrich`:
+
+Store lookups run serially through one reusable connection session. Requests
+honour Store rate-limit responses and retry temporary connection and server
+failures with backoff. Cache updates are checkpointed every 20 completed
+lookups. Pressing Control-C saves completed results before the command exits.
 
 | Column | Description |
 |---|---|
 | `category` | Classified purchase type (see below) |
-| `content_type` | Raw content type from PS Store API |
-| `is_ps_plus` | `True`/`False` if the item was via PS Plus, empty without `--enrich` |
+| `content_type` | Normalised content type from the PS Store API |
+| `top_category` | Raw top-level Store category |
+| `platform` | Playable platform or platforms reported by the Store |
+| `publisher` | Provider or publisher reported by the Store |
+| `release_date` | Release date reported by the Store |
+| `enrichment_status` | Whether Store metadata succeeded, was unavailable, or failed |
+| `classification_source` | Evidence used: `store_api`, `transaction`, `product_name`, `heuristic`, or `unknown` |
+| `is_ps_plus` | `True` only when the product name supplies PS Plus evidence; otherwise empty |
 
 **Category values:**
 
 | Category | Condition |
 |---|---|
-| PS Plus Pack | "PlayStation Plus" in product name |
-| PS Plus Monthly | Transaction total = $0, original price > $0 |
-| Full Game | `FULL_GAME`, `PS5_GAME`, `PS4_GAME`, or standard SKU pattern |
-| DLC / Add-on | `ADDON`, `DLC`, or keywords (pack, skin, season pass) |
-| Bundle | `BUNDLE` content type |
-| In-Game Currency | `CURRENCY` content type |
-| Other | Unclassified |
+| PS Plus Pack | PS Plus name evidence together with a pack or bundle name |
+| PS Plus Monthly | PS Plus name evidence together with a zero total and positive item price |
+| PS Plus Item | Other explicitly named PS Plus item |
+| Full Game | Store content type or top category identifies a game |
+| DLC / Add-on | Store metadata identifies add-on content, or a limited name fallback matches |
+| Bundle | Store metadata identifies a bundle |
+| In-Game Currency | Store metadata identifies virtual currency |
+| Subscription | Store or transaction metadata identifies a subscription |
+| Pre-order | Transaction metadata identifies a pre-order |
+| Promotion | Transaction metadata identifies a promotion |
+| Voucher | Transaction metadata identifies a voucher |
+| Other | No supported evidence identified the content type |
+
+Rows without a product list, such as wallet top-ups and refunds, use transaction
+metadata and have an enrichment status of `not_applicable`.
+
+**Enrichment status values:**
+
+| Status | Meaning |
+|---|---|
+| `success` | Useful Store metadata was returned |
+| `not_found` | The Store returned HTTP 404 |
+| `no_metadata` | The Store response was valid but lacked useful metadata |
+| `temporary_failure` | A network, rate-limit, server, or response error can be retried later |
+| `missing_sku` | The transaction item has no SKU to look up |
+| `not_applicable` | The transaction has no product item to enrich |
 
 SKU lookups are cached atomically in the owner-only file
-`~/.psn-transactions/sku_cache.json`. Transient network and Store API failures
-are not cached, so a later enriched export can retry them.
+`~/.psn-transactions/sku_cache.json`. Cache entries are scoped by Store locale
+and source schema. A 404 is retried after seven days and a valid response with
+no useful metadata is retried after one day. Transient network, rate-limit, and
+Store server failures are not cached, so the next enriched export can retry
+them. Changing locale does not reuse metadata from another regional Store.
 
 ## Development
 

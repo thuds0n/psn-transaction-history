@@ -92,12 +92,20 @@ def fetch(
 def export(
     input: str = typer.Option("psn_transactions.json", "--input", help="Path to raw JSON from fetch."),
     csv: str = typer.Option("psn_transactions.csv", "--csv", help="Path for output CSV."),
-    enrich: bool = typer.Option(False, "--enrich", help="Look up SKUs on PS Store to classify content type."),
+    enrich: bool = typer.Option(
+        False,
+        "--enrich",
+        help="Look up current PS Store metadata and classify purchases.",
+    ),
 ) -> None:
     """Parse transaction JSON and export to CSV."""
     from psn_transactions.parse import export as _export
     try:
-        _export(json_path=input, csv_path=csv, enrich=enrich)
+        _export(
+            json_path=input,
+            csv_path=csv,
+            enrich=enrich,
+        )
     except PSNTransactionsError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1)
