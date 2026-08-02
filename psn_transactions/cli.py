@@ -24,11 +24,21 @@ def login(
             f"Supported: {', '.join(cfg.SUPPORTED_LOCALES)}"
         ),
     ),
+    manual_confirmation: bool = typer.Option(
+        False,
+        "--manual-confirmation",
+        help="Wait for ENTER instead of detecting sign-in automatically.",
+    ),
 ) -> None:
     """Open a browser and save your PSN session for future commands."""
     from psn_transactions.auth import login as _login
     try:
-        _login(force=force, debug=debug, locale=locale)
+        _login(
+            force=force,
+            debug=debug,
+            locale=locale,
+            manual_confirmation=manual_confirmation,
+        )
     except PSNTransactionsError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1)

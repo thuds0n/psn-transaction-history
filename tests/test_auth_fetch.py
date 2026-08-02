@@ -245,6 +245,10 @@ def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
+    context.cookies_result = [
+        {"name": "npsso", "value": "authenticated"},
+        {"name": "isSignedIn", "value": "true"},
+    ]
     browser = FakeBrowser(context)
     saved = []
     validated = []
@@ -253,7 +257,11 @@ def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_FILE", auth_file)
     monkeypatch.setattr(auth, "sync_playwright", lambda: FakePlaywrightRunner(browser))
     monkeypatch.setattr(auth, "_launch_browser", lambda p: (browser, "Chromium"))
-    monkeypatch.setattr(builtins, "input", lambda _: "")
+    monkeypatch.setattr(
+        builtins,
+        "input",
+        lambda _: pytest.fail("automatic login should not prompt for ENTER"),
+    )
     monkeypatch.setattr(auth.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
     monkeypatch.setattr(auth.cfg, "save", lambda data: saved.append(data))
     def fake_validate(page_arg):
@@ -279,6 +287,10 @@ def test_auth_login_does_not_save_unauthenticated_session(tmp_path, monkeypatch)
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
+    context.cookies_result = [
+        {"name": "npsso", "value": "authenticated"},
+        {"name": "isSignedIn", "value": "true"},
+    ]
     browser = FakeBrowser(context)
     saved = []
 
@@ -315,6 +327,7 @@ def test_auth_debug_output_never_discloses_cookie_values(
     context.cookies_result = [
         {"name": "npsso", "value": "super-secret-npsso-value"},
         {"name": "JSESSIONID", "value": "another-secret-value"},
+        {"name": "isSignedIn", "value": "true"},
     ]
     browser = FakeBrowser(context)
 
@@ -386,6 +399,81 @@ def test_auth_validation_converts_navigation_failure():
         auth._validate_authenticated_session(page)
 
 
+def test_automatic_sign_in_waits_for_authenticated_cookie(monkeypatch):
+    class SequencedContext:
+        def __init__(self):
+            self.results = [
+                [{"name": "npsso", "value": "authenticated"}],
+                [
+                    {"name": "npsso", "value": "authenticated"},
+                    {"name": "isSignedIn", "value": "true"},
+                ],
+            ]
+            self.calls = 0
+
+        def cookies(self):
+            self.calls += 1
+            return self.results.pop(0)
+
+    context = SequencedContext()
+    monkeypatch.setattr(auth.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(auth.time, "sleep", lambda _: None)
+
+    auth._wait_for_sign_in(context, timeout=10, poll_interval=0)
+
+    assert context.calls == 2
+
+
+def test_automatic_sign_in_ignores_empty_session_cookie(monkeypatch):
+    context = FakeContext(FakePage())
+    context.cookies_result = [
+        {"name": "npsso", "value": ""},
+        {"name": "isSignedIn", "value": "true"},
+    ]
+    clock = iter([0, 2])
+    monkeypatch.setattr(auth.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(PSNTransactionsError, match="not detected within 1 seconds"):
+        auth._wait_for_sign_in(context, timeout=1, poll_interval=0)
+
+
+def test_automatic_sign_in_reports_closed_browser():
+    class ClosedContext:
+        def cookies(self):
+            raise PlaywrightError("Target page, context or browser has been closed")
+
+    with pytest.raises(PSNTransactionsError, match="Keep the browser window open"):
+        auth._wait_for_sign_in(ClosedContext())
+
+
+def test_manual_confirmation_uses_enter_instead_of_cookie_wait(tmp_path, monkeypatch):
+    auth_dir = tmp_path / ".psn-transactions"
+    auth_file = auth_dir / "auth.json"
+    page = FakePage()
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    prompts = []
+
+    monkeypatch.setattr(auth, "AUTH_DIR", auth_dir)
+    monkeypatch.setattr(auth, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(auth, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(auth, "_launch_browser", lambda p: (browser, "Chromium"))
+    monkeypatch.setattr(auth, "_validate_authenticated_session", lambda page_arg: None)
+    monkeypatch.setattr(
+        auth,
+        "_wait_for_sign_in",
+        lambda context_arg: pytest.fail("manual mode should not poll cookies"),
+    )
+    monkeypatch.setattr(builtins, "input", lambda prompt: prompts.append(prompt) or "")
+    monkeypatch.setattr(auth.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+    monkeypatch.setattr(auth.cfg, "save", lambda data: None)
+
+    auth.login(manual_confirmation=True)
+
+    assert prompts == ["Press ENTER once you are signed in... "]
+    assert auth_file.exists()
+
+
 def test_login_converts_browser_launch_failure():
     class FailingChromium:
         def launch(self, **kwargs):
@@ -405,6 +493,10 @@ def test_login_converts_storage_state_save_failure(tmp_path, monkeypatch):
     auth_file = auth_dir / "auth.json"
     page = FakePage()
     context = FakeContext(page)
+    context.cookies_result = [
+        {"name": "npsso", "value": "authenticated"},
+        {"name": "isSignedIn", "value": "true"},
+    ]
     browser = FakeBrowser(context)
     saved = []
 
@@ -771,6 +863,27 @@ def test_login_cli_prints_expected_failure(monkeypatch):
 
     assert result.exit_code == 1
     assert "Could not launch Playwright Chromium." in result.output
+
+
+def test_login_cli_forwards_manual_confirmation(monkeypatch):
+    calls = []
+
+    def record_login(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(auth, "login", record_login)
+
+    result = CliRunner().invoke(app, ["login", "--manual-confirmation"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "force": False,
+            "debug": False,
+            "locale": None,
+            "manual_confirmation": True,
+        }
+    ]
 
 
 def test_config_and_parse_share_default_locale(tmp_path, monkeypatch):
