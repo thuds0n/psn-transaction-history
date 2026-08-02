@@ -4,11 +4,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from tzlocal import get_localzone_name
 
 from psn_transactions import config as cfg
 from psn_transactions.errors import PSNTransactionsError
@@ -17,13 +19,14 @@ from psn_transactions.storage import atomic_write_json, secure_auth_file
 
 AUTH_FILE = app_dir() / "auth.json"
 GRAPHQL_HASH = "076aae24f704a963a06287c26e69f79afce2ea74ed7535109a15600577c6c479"
+DEFAULT_START_DATE = "1994-12-03T00:00:00.000Z"
 
 # Runs inside the browser page to avoid CORS/CSRF issues
 _JS_FETCH = """
-async ({endDate}) => {
+async ({startDate, endDate}) => {
     const HASH = "076aae24f704a963a06287c26e69f79afce2ea74ed7535109a15600577c6c479";
     const vars = JSON.stringify({
-        startDate: "1994-12-03T00:00:00.000Z",
+        startDate,
         endDate,
         limit: 100
     });
@@ -89,6 +92,84 @@ def _current_end_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def _parse_calendar_date(value: str, option_name: str) -> datetime:
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise PSNTransactionsError(
+            f"Invalid {option_name} date {value!r}; expected YYYY-MM-DD."
+        ) from exc
+
+    if parsed.strftime("%Y-%m-%d") != value:
+        raise PSNTransactionsError(
+            f"Invalid {option_name} date {value!r}; expected YYYY-MM-DD."
+        )
+    return parsed
+
+
+def _resolve_timezone(timezone_name: str | None) -> tuple[str, ZoneInfo]:
+    try:
+        resolved_name = timezone_name or get_localzone_name()
+        return resolved_name, ZoneInfo(resolved_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        if timezone_name:
+            raise PSNTransactionsError(
+                f"Unknown timezone {timezone_name!r}; expected an IANA name such as "
+                "Australia/Sydney or UTC."
+            ) from exc
+        raise PSNTransactionsError(
+            "Could not detect the local timezone. Specify one explicitly with "
+            "`--timezone`, for example `--timezone UTC`."
+        ) from exc
+
+
+def _format_utc_timestamp(value: datetime) -> str:
+    utc_value = value.astimezone(timezone.utc)
+    return utc_value.strftime("%Y-%m-%dT%H:%M:%S.") + (
+        f"{utc_value.microsecond // 1000:03d}Z"
+    )
+
+
+def _resolve_date_range(
+    start_date: str | None,
+    end_date: str | None,
+    timezone_name: str | None = None,
+) -> tuple[str, str, str]:
+    parsed_start = (
+        _parse_calendar_date(start_date, "--start")
+        if start_date is not None
+        else None
+    )
+    parsed_end = (
+        _parse_calendar_date(end_date, "--end") if end_date is not None else None
+    )
+
+    if parsed_start and parsed_end and parsed_start > parsed_end:
+        raise PSNTransactionsError(
+            f"Invalid date range: --start {start_date} is after --end {end_date}."
+        )
+
+    if parsed_start is None and parsed_end is None and timezone_name is None:
+        return DEFAULT_START_DATE, _current_end_date(), "UTC"
+
+    resolved_timezone_name, local_timezone = _resolve_timezone(timezone_name)
+    start_timestamp = (
+        _format_utc_timestamp(parsed_start.replace(tzinfo=local_timezone))
+        if parsed_start
+        else DEFAULT_START_DATE
+    )
+    if parsed_end:
+        next_local_midnight = (parsed_end + timedelta(days=1)).replace(
+            tzinfo=local_timezone
+        )
+        end_timestamp = _format_utc_timestamp(
+            next_local_midnight.astimezone(timezone.utc) - timedelta(milliseconds=1)
+        )
+    else:
+        end_timestamp = _current_end_date()
+    return start_timestamp, end_timestamp, resolved_timezone_name
+
+
 def _format_payload_snippet(payload: Any) -> str:
     snippet = json.dumps(payload, ensure_ascii=True, sort_keys=True)
     if len(snippet) > 300:
@@ -112,9 +193,14 @@ def _format_graphql_errors(errors: Any) -> str:
     return "; ".join(messages) if messages else "unknown GraphQL error"
 
 
-def _fetch_transaction_history_page(page, end_date: str) -> list[dict]:
+def _fetch_transaction_history_page(
+    page, end_date: str, start_date: str = DEFAULT_START_DATE
+) -> list[dict]:
     try:
-        result = page.evaluate(_JS_FETCH, {"endDate": end_date})
+        result = page.evaluate(
+            _JS_FETCH,
+            {"startDate": start_date, "endDate": end_date},
+        )
     except PlaywrightError as exc:
         raise PSNTransactionsError(
             f"Failed to query PlayStation transaction history: {exc}"
@@ -214,8 +300,20 @@ def _pagination_end_date(transaction: Any, page_number: int) -> str:
         ) from exc
 
 
-def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> list:
-    """Fetch full transaction history using saved session. limit= caps page count (for testing)."""
+def fetch_all(
+    output_path: str = "psn_transactions.json",
+    limit: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    timezone_name: str | None = None,
+) -> list:
+    """Fetch transaction history using optional date bounds in the selected timezone."""
+    start_timestamp, end_timestamp, resolved_timezone_name = _resolve_date_range(
+        start_date,
+        end_date,
+        timezone_name,
+    )
+
     if not AUTH_FILE.exists():
         raise FileNotFoundError(
             f"No auth session at {AUTH_FILE}. Run: psn-transactions login"
@@ -223,7 +321,12 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
     secure_auth_file(AUTH_FILE)
 
     all_tx = []
-    end_date = _current_end_date()
+    page_end_date = end_timestamp
+
+    if start_date is not None or end_date is not None:
+        console.print(
+            f"Interpreting date range in [bold]{resolved_timezone_name}[/bold]."
+        )
 
     try:
         with sync_playwright() as p:
@@ -273,7 +376,11 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
                     page_num = 0
 
                     while True:
-                        txs = _fetch_transaction_history_page(page, end_date)
+                        txs = _fetch_transaction_history_page(
+                            page,
+                            page_end_date,
+                            start_timestamp,
+                        )
 
                         if not txs:
                             break
@@ -291,13 +398,15 @@ def fetch_all(output_path: str = "psn_transactions.json", limit: int = None) -> 
                             break
 
                         next_end_date = _pagination_end_date(txs[-1], page_num)
-                        if next_end_date >= end_date:
+                        if next_end_date >= page_end_date:
                             raise PSNTransactionsError(
                                 f"Pagination did not advance after page {page_num}: Sony "
                                 f"returned final transaction date {txs[-1]['date']!r} again. "
                                 "No output was written."
                             )
-                        end_date = next_end_date
+                        if next_end_date < start_timestamp:
+                            break
+                        page_end_date = next_end_date
                         time.sleep(0.3)
             finally:
                 active_error = sys.exc_info()[0] is not None
