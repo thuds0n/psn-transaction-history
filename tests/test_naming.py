@@ -28,24 +28,8 @@ def test_export_defaults_match_contract():
     assert parameters["csv_path"].default == "psn_transactions.csv"
 
 
-def test_app_directory_falls_back_to_legacy_name(tmp_path, monkeypatch):
-    current_directory = tmp_path / ".psn-transactions"
-    legacy_directory = tmp_path / ".psn-receipts"
-    legacy_directory.mkdir()
+def test_app_directory_matches_contract(tmp_path, monkeypatch):
+    application_directory = tmp_path / ".psn-transactions"
+    monkeypatch.setattr(paths, "APP_DIR", application_directory)
 
-    monkeypatch.setattr(paths, "APP_DIR", current_directory)
-    monkeypatch.setattr(paths, "LEGACY_APP_DIR", legacy_directory)
-
-    assert paths.app_dir() == legacy_directory
-
-
-def test_app_directory_prefers_current_name(tmp_path, monkeypatch):
-    current_directory = tmp_path / ".psn-transactions"
-    legacy_directory = tmp_path / ".psn-receipts"
-    current_directory.mkdir()
-    legacy_directory.mkdir()
-
-    monkeypatch.setattr(paths, "APP_DIR", current_directory)
-    monkeypatch.setattr(paths, "LEGACY_APP_DIR", legacy_directory)
-
-    assert paths.app_dir() == current_directory
+    assert paths.app_dir() == application_directory

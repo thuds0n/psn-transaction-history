@@ -19,8 +19,6 @@ python -m playwright install chromium
 
 Run `source .venv/bin/activate` again when returning to the project in a new terminal. The `.venv/` directory is ignored by Git.
 
-If upgrading from the former `psn-receipts` name, see [Renaming from psn-receipts](#renaming-from-psn-receipts) before reinstalling.
-
 ## Usage
 
 ### 1. Log in (once)
@@ -102,18 +100,6 @@ Running `psn-transactions export --enrich` looks up each SKU against the PS Stor
 | Other | Unclassified |
 
 SKU lookups are cached in `~/.psn-transactions/sku_cache.json`.
-
-## Renaming from psn-receipts
-
-The renamed package continues to read `~/.psn-receipts` when that legacy directory exists and `~/.psn-transactions` does not. To complete the local migration and retain your saved login, locale, and SKU cache:
-
-```bash
-mv ~/.psn-receipts ~/.psn-transactions
-python -m pip uninstall psn-receipts
-python -m pip install -e '.[dev]'
-```
-
-After reinstalling, use `psn-transactions`; the former `psn-receipts` command is not retained.
 
 ## Development
 

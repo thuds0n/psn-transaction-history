@@ -442,7 +442,7 @@ def test_fetch_all_converts_store_navigation_failure(tmp_path, monkeypatch):
     assert not output_path.exists()
 
 
-def test_fetch_restricts_legacy_auth_file_permissions(tmp_path, monkeypatch):
+def test_fetch_restricts_existing_auth_file_permissions(tmp_path, monkeypatch):
     auth_directory = tmp_path / ".psn-transactions"
     auth_directory.mkdir(mode=0o755)
     auth_file = auth_directory / "auth.json"
