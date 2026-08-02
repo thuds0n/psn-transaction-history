@@ -96,7 +96,11 @@ def export(
 ) -> None:
     """Parse transaction JSON and export to CSV."""
     from psn_transactions.parse import export as _export
-    _export(json_path=input, csv_path=csv, enrich=enrich)
+    try:
+        _export(json_path=input, csv_path=csv, enrich=enrich)
+    except PSNTransactionsError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

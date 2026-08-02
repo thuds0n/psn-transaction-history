@@ -197,6 +197,26 @@ def _format_graphql_errors(errors: Any) -> str:
     return "; ".join(messages) if messages else "unknown GraphQL error"
 
 
+def _graphql_errors_indicate_expired_session(errors: Any) -> bool:
+    if not isinstance(errors, list):
+        return False
+    authentication_markers = (
+        "access denied",
+        "unauthenticated",
+        "not authorized",
+        "not authorised",
+    )
+    return any(
+        isinstance(error, dict)
+        and isinstance(error.get("message"), str)
+        and any(
+            marker in error["message"].lower()
+            for marker in authentication_markers
+        )
+        for error in errors
+    )
+
+
 def _extract_transactions(result: Any, transport: str = "browser") -> list[dict]:
     if not isinstance(result, dict):
         raise PSNTransactionsError(
@@ -256,9 +276,24 @@ def _extract_transactions(result: Any, transport: str = "browser") -> list[dict]
 
     graphql_errors = payload.get("errors")
     if graphql_errors:
+        formatted_errors = _format_graphql_errors(graphql_errors)
+        if _graphql_errors_indicate_expired_session(graphql_errors):
+            if transport == "http":
+                raise PSNTransactionsError(
+                    "PlayStation did not authorise the direct HTTP request: "
+                    f"{formatted_errors}. Retry with "
+                    "`psn-transactions fetch --transport browser`. If the browser "
+                    "transport is also rejected, sign in again with "
+                    "`psn-transactions login --force`."
+                )
+            raise PSNTransactionsError(
+                "PlayStation did not authorise the saved browser session: "
+                f"{formatted_errors}. Sign in again with "
+                "`psn-transactions login --force`."
+            )
         message = (
             "PlayStation transaction history returned GraphQL errors: "
-            f"{_format_graphql_errors(graphql_errors)}"
+            f"{formatted_errors}"
         )
         if transport == "http":
             message += " Retry with `psn-transactions fetch --transport browser`."

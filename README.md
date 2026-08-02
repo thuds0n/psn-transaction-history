@@ -2,7 +2,7 @@
 
 Export your complete PlayStation Network transaction history.
 
-Sony hides transaction history behind infinite scroll and bot protection. This tool uses a saved browser session to call the internal PSN GraphQL API directly, bypassing CORS via `page.evaluate()`, and enriches results with content-type metadata from the PS Store API.
+Sony hides transaction history behind infinite scroll and bot protection. This tool signs in through a real browser, securely saves the resulting session, calls the internal PSN GraphQL API directly over HTTP, and enriches results with content-type metadata from the PS Store API. A browser-based fetch transport remains available as a fallback.
 
 Works with all major PSN regions (default US).
 
@@ -102,6 +102,7 @@ psn-transactions export --enrich --csv enriched_transactions.csv
 ```
 
 The default CSV output is `psn_transactions.csv`.
+The completed CSV replaces any existing file atomically.
 
 ## CSV columns
 
@@ -140,7 +141,9 @@ Running `psn-transactions export --enrich` looks up each SKU against the PS Stor
 | In-Game Currency | `CURRENCY` content type |
 | Other | Unclassified |
 
-SKU lookups are cached in `~/.psn-transactions/sku_cache.json`.
+SKU lookups are cached atomically in the owner-only file
+`~/.psn-transactions/sku_cache.json`. Transient network and Store API failures
+are not cached, so a later enriched export can retry them.
 
 ## Development
 

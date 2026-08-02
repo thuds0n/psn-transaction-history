@@ -1,7 +1,16 @@
 """Tests for PSN transaction parsing and classification logic."""
 
-import pytest
+import csv
+import json
+import stat
 
+import pytest
+import requests
+from typer.testing import CliRunner
+
+from psn_transactions import parse, storage
+from psn_transactions.cli import app
+from psn_transactions.errors import PSNTransactionsError
 from psn_transactions.parse import _classify, _flatten, _sku_base, CSV_FIELDS
 
 
@@ -268,3 +277,200 @@ class TestFlatten:
         tx = make_tx(tx_id="787042153182277", products=[product])
         rows = _flatten([tx], cache={}, enrich=False)
         assert rows[0]["transaction_id"] == "787042153182277"
+
+
+# ---------------------------------------------------------------------------
+# Export and cache integrity
+# ---------------------------------------------------------------------------
+
+class TestExportIntegrity:
+    def test_export_writes_complete_csv(self, tmp_path):
+        input_path = tmp_path / "transactions.json"
+        output_path = tmp_path / "transactions.csv"
+        input_path.write_text(
+            json.dumps(
+                [
+                    make_tx(
+                        products=[
+                            make_product(
+                                "Some Game",
+                                "UP001-CUSA00001_00-GAME-E001",
+                            )
+                        ]
+                    )
+                ]
+            )
+        )
+
+        parse.export(json_path=str(input_path), csv_path=str(output_path))
+
+        with output_path.open(newline="", encoding="utf-8") as output_file:
+            rows = list(csv.DictReader(output_file))
+        assert len(rows) == 1
+        assert rows[0]["product"] == "Some Game"
+        assert set(rows[0]) == set(CSV_FIELDS)
+
+    @pytest.mark.parametrize(
+        ("contents", "message"),
+        [
+            ("not-json", "Could not read transaction JSON"),
+            (json.dumps({"id": "TX001"}), "must contain a list"),
+            (json.dumps(["not-an-object"]), "non-object transaction"),
+        ],
+    )
+    def test_export_rejects_malformed_transaction_json(
+        self, tmp_path, contents, message
+    ):
+        input_path = tmp_path / "transactions.json"
+        input_path.write_text(contents)
+
+        with pytest.raises(PSNTransactionsError, match=message):
+            parse.export(
+                json_path=str(input_path),
+                csv_path=str(tmp_path / "transactions.csv"),
+            )
+
+    def test_export_failure_preserves_existing_csv(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "transactions.json"
+        output_path = tmp_path / "transactions.csv"
+        input_path.write_text(json.dumps([make_tx()]))
+        output_path.write_text("existing export")
+
+        monkeypatch.setattr(
+            storage.os,
+            "replace",
+            lambda source, destination: (_ for _ in ()).throw(
+                OSError("simulated disk failure")
+            ),
+        )
+
+        with pytest.raises(PSNTransactionsError, match="Could not save CSV export"):
+            parse.export(json_path=str(input_path), csv_path=str(output_path))
+
+        assert output_path.read_text() == "existing export"
+        assert list(tmp_path.glob(".transactions.csv.*.tmp")) == []
+
+    def test_basic_export_does_not_depend_on_sku_cache(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "transactions.json"
+        output_path = tmp_path / "transactions.csv"
+        cache_file = tmp_path / "sku_cache.json"
+        input_path.write_text(json.dumps([make_tx()]))
+        cache_file.write_text("not-json")
+        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+
+        parse.export(
+            json_path=str(input_path),
+            csv_path=str(output_path),
+            enrich=False,
+        )
+
+        assert output_path.exists()
+
+    def test_export_cli_reports_missing_input_without_traceback(self, tmp_path):
+        missing_path = tmp_path / "missing.json"
+
+        result = CliRunner().invoke(
+            app,
+            ["export", "--input", str(missing_path)],
+        )
+
+        assert result.exit_code == 1
+        assert "Transaction JSON not found" in result.output
+        assert "Traceback" not in result.output
+
+
+class TestSkuCacheIntegrity:
+    def test_cache_is_private_and_atomic(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / ".psn-transactions" / "sku_cache.json"
+        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+
+        parse._save_cache({"SKU001": {"content_type": "FULL_GAME"}})
+
+        assert json.loads(cache_file.read_text()) == {
+            "SKU001": {"content_type": "FULL_GAME"}
+        }
+        assert stat.S_IMODE(cache_file.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
+
+    def test_malformed_cache_reports_user_facing_error(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / "sku_cache.json"
+        cache_file.write_text("not-json")
+        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+
+        with pytest.raises(PSNTransactionsError, match="Could not read SKU cache"):
+            parse._load_cache()
+
+    def test_cache_write_failure_preserves_existing_cache(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / "sku_cache.json"
+        cache_file.write_text(json.dumps({"existing": {"content_type": "GAME"}}))
+        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(
+            storage.os,
+            "replace",
+            lambda source, destination: (_ for _ in ()).throw(
+                OSError("simulated disk failure")
+            ),
+        )
+
+        with pytest.raises(PSNTransactionsError, match="Could not save SKU cache"):
+            parse._save_cache({"new": {"content_type": "FULL_GAME"}})
+
+        assert json.loads(cache_file.read_text()) == {
+            "existing": {"content_type": "GAME"}
+        }
+        assert list(tmp_path.glob(".sku_cache.json.*.tmp")) == []
+
+    def test_legacy_cached_failures_are_retried(self, tmp_path, monkeypatch):
+        cache_file = tmp_path / "sku_cache.json"
+        cache_file.write_text(json.dumps({"SKU001": {"error": 503}}))
+        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+
+        assert parse._load_cache() == {}
+
+    def test_transient_lookup_failure_is_not_cached_and_retries(self, monkeypatch):
+        class FakeResponse:
+            def __init__(self, status_code, payload=None):
+                self.status_code = status_code
+                self.payload = payload
+
+            def json(self):
+                return self.payload
+
+        responses = iter(
+            [
+                FakeResponse(503),
+                FakeResponse(200, {"attributes": {"game_content_type": "FULL_GAME"}}),
+            ]
+        )
+        calls = []
+        monkeypatch.setattr(
+            parse.requests,
+            "get",
+            lambda *args, **kwargs: calls.append((args, kwargs)) or next(responses),
+        )
+        monkeypatch.setattr(parse.time, "sleep", lambda _: None)
+        cache = {}
+
+        first = parse._lookup_sku("SKU001", cache)
+        second = parse._lookup_sku("SKU001", cache)
+
+        assert first == {"error": 503}
+        assert second["content_type"] == "FULL_GAME"
+        assert cache == {"SKU001": second}
+        assert len(calls) == 2
+
+    def test_network_failure_is_not_cached(self, monkeypatch):
+        monkeypatch.setattr(
+            parse.requests,
+            "get",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                requests.ConnectionError("offline")
+            ),
+        )
+        monkeypatch.setattr(parse.time, "sleep", lambda _: None)
+        cache = {}
+
+        result = parse._lookup_sku("SKU001", cache)
+
+        assert "offline" in result["error"]
+        assert cache == {}
