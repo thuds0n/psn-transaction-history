@@ -66,6 +66,11 @@ def fetch(
         "--timezone",
         help="IANA timezone for date bounds, e.g. Australia/Sydney (default: local timezone).",
     ),
+    transport: str = typer.Option(
+        "http",
+        "--transport",
+        help="Fetch transport: http (default) or browser fallback.",
+    ),
 ) -> None:
     """Fetch transaction history from PSN and save to JSON."""
     from psn_transactions.fetch import fetch_all
@@ -76,6 +81,7 @@ def fetch(
             start_date=start_date,
             end_date=end_date,
             timezone_name=timezone_name,
+            transport=transport,
         )
     except (FileNotFoundError, PSNTransactionsError) as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)

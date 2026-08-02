@@ -1,9 +1,11 @@
 import builtins
+import inspect
 import json
 import stat
 from pathlib import Path
 
 import pytest
+import requests
 from playwright.sync_api import Error as PlaywrightError
 from typer.testing import CliRunner
 
@@ -109,6 +111,42 @@ class FakePlaywright:
         return self.browser
 
 
+class FakeHTTPResponse:
+    def __init__(self, payload=None, status=200, reason="OK", text=None):
+        self.payload = payload
+        self.status_code = status
+        self.reason = reason
+        self.ok = status < 400
+        self.text = json.dumps(payload) if text is None else text
+
+    def json(self):
+        if isinstance(self.payload, Exception):
+            raise self.payload
+        return self.payload
+
+
+class FakeHTTPSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.get_calls = []
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def get(self, url, **kwargs):
+        self.get_calls.append((url, kwargs))
+        result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
 def test_fetch_all_writes_transactions_after_valid_responses(tmp_path, monkeypatch):
     auth_file = tmp_path / "auth.json"
     auth_file.write_text("{}")
@@ -124,7 +162,7 @@ def test_fetch_all_writes_transactions_after_valid_responses(tmp_path, monkeypat
     monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: "en-gb")
 
-    result = fetch.fetch_all(output_path=str(output_path))
+    result = fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert result == transactions
     assert json.loads(output_path.read_text()) == transactions
@@ -144,10 +182,62 @@ def test_fetch_all_allows_empty_first_page(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    result = fetch.fetch_all(output_path=str(output_path))
+    result = fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert result == []
     assert json.loads(output_path.read_text()) == []
+
+
+def test_http_fetch_uses_saved_cookies_without_starting_playwright(
+    tmp_path, monkeypatch
+):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "isSignedIn",
+                        "value": "true",
+                        "domain": ".playstation.com",
+                        "path": "/",
+                        "secure": True,
+                        "expires": -1,
+                    }
+                ]
+            }
+        )
+    )
+    output_path = tmp_path / "http.json"
+    session = FakeHTTPSession([FakeHTTPResponse(success_result([])["body"])])
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch.requests, "Session", lambda: session)
+    monkeypatch.setattr(
+        fetch,
+        "sync_playwright",
+        lambda: pytest.fail("HTTP transport should not start Playwright"),
+    )
+
+    result = fetch.fetch_all(output_path=str(output_path), transport="http")
+
+    assert result == []
+    assert json.loads(output_path.read_text()) == []
+    assert session.cookies.get("isSignedIn", domain=".playstation.com") == "true"
+    assert session.closed is True
+
+
+def test_http_fetch_rejects_malformed_saved_cookie_state(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps({"cookies": "not-a-list"}))
+    output_path = tmp_path / "http.json"
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+
+    with pytest.raises(PSNTransactionsError, match="unexpected cookie format"):
+        fetch.fetch_all(output_path=str(output_path), transport="http")
+
+    assert not output_path.exists()
 
 
 def test_fetch_all_does_not_write_partial_output_on_failure(tmp_path, monkeypatch):
@@ -176,7 +266,7 @@ def test_fetch_all_does_not_write_partial_output_on_failure(tmp_path, monkeypatc
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
     with pytest.raises(PSNTransactionsError, match="GraphQL errors"):
-        fetch.fetch_all(output_path=str(output_path))
+        fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert not output_path.exists()
 
@@ -235,9 +325,78 @@ def test_fetch_helper_passes_date_range_to_browser():
             {
                 "startDate": "2025-01-01T00:00:00.000Z",
                 "endDate": "2025-12-31T23:59:59.999Z",
+                "url": fetch.GRAPHQL_URL,
+                "hash": fetch.GRAPHQL_HASH,
+                "headers": fetch.GRAPHQL_HEADERS,
             },
         )
     ]
+
+
+def test_http_fetch_passes_equivalent_graphql_request():
+    session = FakeHTTPSession([FakeHTTPResponse(success_result([])["body"])])
+
+    result = fetch._fetch_transaction_history_page_http(
+        session,
+        "2025-12-31T23:59:59.999Z",
+        "2025-01-01T00:00:00.000Z",
+    )
+
+    assert result == []
+    assert len(session.get_calls) == 1
+    url, request = session.get_calls[0]
+    assert url == fetch.GRAPHQL_URL
+    assert request["headers"] == fetch.GRAPHQL_HEADERS
+    assert request["timeout"] == fetch.HTTP_TIMEOUT_SECONDS
+    assert json.loads(request["params"]["variables"]) == {
+        "startDate": "2025-01-01T00:00:00.000Z",
+        "endDate": "2025-12-31T23:59:59.999Z",
+        "limit": 100,
+    }
+    assert json.loads(request["params"]["extensions"]) == {
+        "persistedQuery": {"version": 1, "sha256Hash": fetch.GRAPHQL_HASH}
+    }
+
+
+def test_http_fetch_converts_request_failure():
+    session = FakeHTTPSession([requests.ConnectionError("connection reset")])
+
+    with pytest.raises(PSNTransactionsError, match="connection reset"):
+        fetch._fetch_transaction_history_page_http(
+            session,
+            "2025-12-31T23:59:59.999Z",
+        )
+
+
+def test_http_fetch_rejects_non_json_response():
+    session = FakeHTTPSession(
+        [FakeHTTPResponse(ValueError("not JSON"), text="access denied")]
+    )
+
+    with pytest.raises(PSNTransactionsError, match="non-JSON response"):
+        fetch._fetch_transaction_history_page_http(
+            session,
+            "2025-12-31T23:59:59.999Z",
+        )
+
+
+def test_http_fetch_recommends_browser_fallback_when_rejected():
+    session = FakeHTTPSession(
+        [FakeHTTPResponse({"error": "forbidden"}, status=403, reason="Forbidden")]
+    )
+
+    with pytest.raises(
+        PSNTransactionsError,
+        match=r"fetch --transport browser",
+    ):
+        fetch._fetch_transaction_history_page_http(
+            session,
+            "2025-12-31T23:59:59.999Z",
+        )
+
+
+def test_fetch_defaults_to_http_transport():
+    assert inspect.signature(fetch.fetch_all).parameters["transport"].default == "http"
 
 
 def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
@@ -488,6 +647,52 @@ def test_login_converts_browser_launch_failure():
     assert "python3 -m playwright install chromium" in str(exc_info.value)
 
 
+def test_fetch_browser_prefers_system_chrome():
+    expected_browser = object()
+
+    class RecordingChromium:
+        def __init__(self):
+            self.calls = []
+
+        def launch(self, **kwargs):
+            self.calls.append(kwargs)
+            return expected_browser
+
+    class RecordingPlaywright:
+        chromium = RecordingChromium()
+
+    playwright = RecordingPlaywright()
+
+    assert fetch._launch_fetch_browser(playwright) is expected_browser
+    assert playwright.chromium.calls == [{"channel": "chrome", "headless": True}]
+
+
+def test_fetch_browser_uses_bundled_fallback_after_system_channels_fail():
+    expected_browser = object()
+
+    class FallbackChromium:
+        def __init__(self):
+            self.calls = []
+
+        def launch(self, **kwargs):
+            self.calls.append(kwargs)
+            if "channel" in kwargs:
+                raise PlaywrightError("channel unavailable")
+            return expected_browser
+
+    class FallbackPlaywright:
+        chromium = FallbackChromium()
+
+    playwright = FallbackPlaywright()
+
+    assert fetch._launch_fetch_browser(playwright) is expected_browser
+    assert playwright.chromium.calls == [
+        {"channel": "chrome", "headless": True},
+        {"channel": "msedge", "headless": True},
+        {"headless": True},
+    ]
+
+
 def test_login_converts_storage_state_save_failure(tmp_path, monkeypatch):
     auth_dir = tmp_path / ".psn-transactions"
     auth_file = auth_dir / "auth.json"
@@ -533,7 +738,9 @@ def test_fetch_all_converts_saved_state_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
 
     with pytest.raises(PSNTransactionsError, match="Could not load the saved browser session"):
-        fetch.fetch_all(output_path=str(tmp_path / "output.json"))
+        fetch.fetch_all(
+            output_path=str(tmp_path / "output.json"), transport="browser"
+        )
 
     assert browser.closed is True
 
@@ -550,7 +757,7 @@ def test_fetch_all_converts_store_navigation_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
     with pytest.raises(PSNTransactionsError, match="Could not navigate to PlayStation Store"):
-        fetch.fetch_all(output_path=str(output_path))
+        fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert browser.closed is True
     assert not output_path.exists()
@@ -569,7 +776,7 @@ def test_fetch_restricts_existing_auth_file_permissions(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    fetch.fetch_all(output_path=str(output_path))
+    fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert stat.S_IMODE(auth_directory.stat().st_mode) == 0o700
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
@@ -708,7 +915,7 @@ def test_fetch_all_does_not_write_output_for_malformed_pagination_date(
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
     with pytest.raises(PSNTransactionsError, match="transaction 'TX001' has malformed date"):
-        fetch.fetch_all(output_path=str(output_path))
+        fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert browser.closed is True
     assert not output_path.exists()
@@ -733,7 +940,7 @@ def test_fetch_stops_when_pagination_boundary_repeats(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
     with pytest.raises(PSNTransactionsError, match="Pagination did not advance"):
-        fetch.fetch_all(output_path=str(output_path))
+        fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert browser.closed is True
     assert not output_path.exists()
@@ -759,14 +966,13 @@ def test_fetch_stops_at_requested_start_date(tmp_path, monkeypatch):
         start_date="2025-01-01",
         end_date="2025-12-31",
         timezone_name="UTC",
+        transport="browser",
     )
 
     assert result == transactions
     assert len(page.evaluate_calls) == 1
-    assert page.evaluate_calls[0][1] == {
-        "startDate": "2025-01-01T00:00:00.000Z",
-        "endDate": "2025-12-31T23:59:59.999Z",
-    }
+    assert page.evaluate_calls[0][1]["startDate"] == "2025-01-01T00:00:00.000Z"
+    assert page.evaluate_calls[0][1]["endDate"] == "2025-12-31T23:59:59.999Z"
     assert json.loads(output_path.read_text()) == transactions
 
 
@@ -819,6 +1025,7 @@ def test_fetch_cli_forwards_date_range(monkeypatch):
             "start_date": "2025-01-01",
             "end_date": "2025-12-31",
             "timezone_name": None,
+            "transport": "http",
         }
     ]
 
@@ -844,6 +1051,27 @@ def test_fetch_cli_forwards_timezone_override(monkeypatch):
 
     assert result.exit_code == 0
     assert calls[0]["timezone_name"] == "Australia/Perth"
+
+
+def test_fetch_cli_forwards_http_transport(monkeypatch):
+    calls = []
+
+    def record_fetch(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(fetch, "fetch_all", record_fetch)
+
+    result = CliRunner().invoke(app, ["fetch", "--transport", "http"])
+
+    assert result.exit_code == 0
+    assert calls[0]["transport"] == "http"
+
+
+def test_fetch_cli_rejects_unknown_transport_before_opening_browser():
+    result = CliRunner().invoke(app, ["fetch", "--transport", "ftp"])
+
+    assert result.exit_code == 1
+    assert "Unknown fetch transport 'ftp'" in result.output
 
 
 def test_fetch_cli_reports_invalid_date_before_opening_browser():
