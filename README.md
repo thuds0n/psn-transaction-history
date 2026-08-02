@@ -52,6 +52,27 @@ psn-transactions fetch --limit 1
 psn-transactions fetch --output my_transactions.json
 ```
 
+To fetch an inclusive date range, provide a start date, an end date, or both:
+
+```bash
+psn-transactions fetch --start 2025-01-01
+psn-transactions fetch --end 2025-12-31
+psn-transactions fetch --start 2025-01-01 --end 2025-12-31
+```
+
+Date bounds use your computer's local timezone by default. The detected IANA
+timezone is shown when fetching, and daylight-saving changes are handled before
+the boundaries are converted to UTC for PSN. Override the timezone when needed:
+
+```bash
+psn-transactions fetch --start 2025-01-01 --timezone Australia/Sydney
+psn-transactions fetch --start 2025-01-01 --timezone Europe/London
+psn-transactions fetch --start 2025-01-01 --timezone UTC
+```
+
+For repeatable scripts, specify `--timezone` explicitly so results do not depend
+on the timezone configured on the machine running the command.
+
 ### 3. Export to CSV
 
 ```bash
@@ -120,4 +141,3 @@ python -m pytest tests/ -v
 ## Backlog
 
 - Auto-detect when user has completed sign-in via the browser, instead of requiring manual confirmation. Include a setting to turn on manual confirmation as a fallback.
-- Support fetching transactions for a user-specified date range (start date and/or end date), not just full account history.

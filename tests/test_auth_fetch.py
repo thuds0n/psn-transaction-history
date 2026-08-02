@@ -38,6 +38,7 @@ class FakePage:
         self.goto_results = list(goto_results or [])
         self.body = body
         self.goto_calls = []
+        self.evaluate_calls = []
 
     def goto(self, url):
         self.goto_calls.append(url)
@@ -51,6 +52,7 @@ class FakePage:
         return self.body
 
     def evaluate(self, script, payload):
+        self.evaluate_calls.append((script, payload))
         result = self.evaluate_results.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -216,6 +218,26 @@ def test_fetch_helper_raises_on_page_evaluate_failure():
 
     with pytest.raises(PSNTransactionsError, match="page crashed"):
         fetch._fetch_transaction_history_page(page, "2025-01-01T00:00:00.000Z")
+
+
+def test_fetch_helper_passes_date_range_to_browser():
+    page = FakePage([success_result([])])
+
+    fetch._fetch_transaction_history_page(
+        page,
+        "2025-12-31T23:59:59.999Z",
+        "2025-01-01T00:00:00.000Z",
+    )
+
+    assert page.evaluate_calls == [
+        (
+            fetch._JS_FETCH,
+            {
+                "startDate": "2025-01-01T00:00:00.000Z",
+                "endDate": "2025-12-31T23:59:59.999Z",
+            },
+        )
+    ]
 
 
 def test_auth_login_saves_state_only_after_validation(tmp_path, monkeypatch):
@@ -492,6 +514,94 @@ def test_pagination_normalises_valid_timestamp_to_utc():
     ) == "2025-01-14T23:59:59.999Z"
 
 
+def test_date_range_converts_local_day_boundaries_to_utc_across_dst():
+    assert fetch._resolve_date_range(
+        "2025-01-01",
+        "2025-08-02",
+        "Australia/Sydney",
+    ) == (
+        "2024-12-31T13:00:00.000Z",
+        "2025-08-02T13:59:59.999Z",
+        "Australia/Sydney",
+    )
+
+
+def test_date_range_supports_explicit_utc_boundaries():
+    assert fetch._resolve_date_range("2025-01-01", "2025-12-31", "UTC") == (
+        "2025-01-01T00:00:00.000Z",
+        "2025-12-31T23:59:59.999Z",
+        "UTC",
+    )
+
+
+def test_date_range_keeps_defaults_for_omitted_bounds(monkeypatch):
+    monkeypatch.setattr(
+        fetch,
+        "_current_end_date",
+        lambda: "2026-08-02T10:30:00.000Z",
+    )
+
+    assert fetch._resolve_date_range(None, "2025-12-31", "UTC") == (
+        fetch.DEFAULT_START_DATE,
+        "2025-12-31T23:59:59.999Z",
+        "UTC",
+    )
+    assert fetch._resolve_date_range("2025-01-01", None, "UTC") == (
+        "2025-01-01T00:00:00.000Z",
+        "2026-08-02T10:30:00.000Z",
+        "UTC",
+    )
+
+
+def test_date_range_detects_local_timezone(monkeypatch):
+    monkeypatch.setattr(fetch, "get_localzone_name", lambda: "Europe/London")
+
+    assert fetch._resolve_date_range("2025-07-01", "2025-07-01") == (
+        "2025-06-30T23:00:00.000Z",
+        "2025-07-01T22:59:59.999Z",
+        "Europe/London",
+    )
+
+
+def test_full_history_does_not_require_timezone_detection(monkeypatch):
+    monkeypatch.setattr(
+        fetch,
+        "get_localzone_name",
+        lambda: pytest.fail("timezone detection should not run"),
+    )
+    monkeypatch.setattr(
+        fetch,
+        "_current_end_date",
+        lambda: "2026-08-02T10:30:00.000Z",
+    )
+
+    assert fetch._resolve_date_range(None, None) == (
+        fetch.DEFAULT_START_DATE,
+        "2026-08-02T10:30:00.000Z",
+        "UTC",
+    )
+
+
+def test_date_range_rejects_unknown_timezone():
+    with pytest.raises(PSNTransactionsError, match="Unknown timezone 'Mars/Olympus'"):
+        fetch._resolve_date_range("2025-01-01", None, "Mars/Olympus")
+
+
+@pytest.mark.parametrize(
+    ("start_date", "end_date", "message"),
+    [
+        ("01-01-2025", None, "Invalid --start date"),
+        (None, "2025-02-29", "Invalid --end date"),
+        ("2025-1-01", None, "Invalid --start date"),
+        ("", None, "Invalid --start date"),
+        ("2025-12-31", "2025-01-01", "--start 2025-12-31 is after --end 2025-01-01"),
+    ],
+)
+def test_date_range_rejects_invalid_values(start_date, end_date, message):
+    with pytest.raises(PSNTransactionsError, match=message):
+        fetch._resolve_date_range(start_date, end_date)
+
+
 def test_fetch_all_does_not_write_output_for_malformed_pagination_date(
     tmp_path, monkeypatch
 ):
@@ -537,6 +647,37 @@ def test_fetch_stops_when_pagination_boundary_repeats(tmp_path, monkeypatch):
     assert not output_path.exists()
 
 
+def test_fetch_stops_at_requested_start_date(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}")
+    output_path = tmp_path / "output.json"
+    transactions = [
+        {"id": "TX001", "date": "2025-01-01T00:00:00.000Z"},
+    ]
+    page = FakePage([success_result(transactions)])
+    browser = FakeBrowser(FakeContext(page))
+
+    monkeypatch.setattr(fetch, "AUTH_FILE", auth_file)
+    monkeypatch.setattr(fetch, "sync_playwright", lambda: FakePlaywrightRunner(browser))
+    monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
+
+    result = fetch.fetch_all(
+        output_path=str(output_path),
+        start_date="2025-01-01",
+        end_date="2025-12-31",
+        timezone_name="UTC",
+    )
+
+    assert result == transactions
+    assert len(page.evaluate_calls) == 1
+    assert page.evaluate_calls[0][1] == {
+        "startDate": "2025-01-01T00:00:00.000Z",
+        "endDate": "2025-12-31T23:59:59.999Z",
+    }
+    assert json.loads(output_path.read_text()) == transactions
+
+
 def test_atomic_output_failure_preserves_existing_export(tmp_path, monkeypatch):
     output_path = tmp_path / "transactions.json"
     output_path.write_text("existing export")
@@ -563,6 +704,61 @@ def test_fetch_cli_prints_expected_failure(monkeypatch):
 
     assert result.exit_code == 1
     assert "Could not load the saved browser session." in result.output
+
+
+def test_fetch_cli_forwards_date_range(monkeypatch):
+    calls = []
+
+    def record_fetch(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(fetch, "fetch_all", record_fetch)
+
+    result = CliRunner().invoke(
+        app,
+        ["fetch", "--start", "2025-01-01", "--end", "2025-12-31"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "output_path": "psn_transactions.json",
+            "limit": None,
+            "start_date": "2025-01-01",
+            "end_date": "2025-12-31",
+            "timezone_name": None,
+        }
+    ]
+
+
+def test_fetch_cli_forwards_timezone_override(monkeypatch):
+    calls = []
+
+    def record_fetch(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(fetch, "fetch_all", record_fetch)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "fetch",
+            "--start",
+            "2025-01-01",
+            "--timezone",
+            "Australia/Perth",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0]["timezone_name"] == "Australia/Perth"
+
+
+def test_fetch_cli_reports_invalid_date_before_opening_browser():
+    result = CliRunner().invoke(app, ["fetch", "--start", "not-a-date"])
+
+    assert result.exit_code == 1
+    assert "Invalid --start date 'not-a-date'; expected YYYY-MM-DD." in result.output
 
 
 def test_login_cli_prints_expected_failure(monkeypatch):
