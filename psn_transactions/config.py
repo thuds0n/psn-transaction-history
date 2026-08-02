@@ -1,12 +1,12 @@
-"""Persistent per-user configuration stored in ~/.psn-receipts/config.json."""
+"""Persistent per-user configuration for PSN Transactions."""
 
 import json
-from pathlib import Path
 
-from psn_receipts.errors import PSNReceiptsError
-from psn_receipts.storage import atomic_write_json
+from psn_transactions.errors import PSNTransactionsError
+from psn_transactions.paths import app_dir
+from psn_transactions.storage import atomic_write_json
 
-CONFIG_FILE = Path.home() / ".psn-receipts" / "config.json"
+CONFIG_FILE = app_dir() / "config.json"
 DEFAULT_LOCALE = "en-us"
 
 _DEFAULTS: dict = {"locale": DEFAULT_LOCALE}
@@ -40,11 +40,11 @@ def load() -> dict:
         try:
             saved = json.loads(CONFIG_FILE.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            raise PSNReceiptsError(
+            raise PSNTransactionsError(
                 f"Could not read configuration from {CONFIG_FILE}: {exc}"
             ) from exc
         if not isinstance(saved, dict):
-            raise PSNReceiptsError(
+            raise PSNTransactionsError(
                 f"Configuration at {CONFIG_FILE} must contain a JSON object."
             )
         return {**_DEFAULTS, **saved}
@@ -59,7 +59,7 @@ def save(data: dict) -> None:
     try:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Could not create the configuration directory {CONFIG_FILE.parent}: {exc}"
         ) from exc
     existing = load()

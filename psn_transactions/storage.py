@@ -6,19 +6,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from psn_receipts.errors import PSNReceiptsError
+from psn_transactions.errors import PSNTransactionsError
 
 
 def secure_auth_directory(auth_directory: Path) -> None:
     if auth_directory.is_symlink():
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Refusing to store authentication data in symlinked directory {auth_directory}."
         )
     try:
         auth_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         auth_directory.chmod(0o700)
     except OSError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Could not secure the authentication directory {auth_directory}: {exc}"
         ) from exc
 
@@ -26,13 +26,13 @@ def secure_auth_directory(auth_directory: Path) -> None:
 def secure_auth_file(auth_file: Path) -> None:
     secure_auth_directory(auth_file.parent)
     if auth_file.is_symlink() or not auth_file.is_file():
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Saved session {auth_file} must be a regular file, not a symlink or directory."
         )
     try:
         auth_file.chmod(0o600)
     except OSError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Could not restrict access to the saved session {auth_file}: {exc}"
         ) from exc
 
@@ -55,7 +55,7 @@ def atomic_write_json(
             os.fsync(temporary_file.fileno())
         os.replace(temporary_path, output_path)
     except OSError as exc:
-        raise PSNReceiptsError(
+        raise PSNTransactionsError(
             f"Could not save {description} to {output_path}: {exc}"
         ) from exc
     finally:

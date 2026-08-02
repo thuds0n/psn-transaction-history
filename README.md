@@ -1,4 +1,4 @@
-# psn-receipts
+# PSN Transaction History
 
 Export your complete PlayStation Network transaction history.
 
@@ -8,51 +8,59 @@ Works with all major PSN regions (default US).
 
 ## Install
 
+Create a project-local virtual environment so `python` and installed commands consistently use the required Python version:
+
 ```bash
-python3 -m pip install -e .
-python3 -m playwright install chromium
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m playwright install chromium
 ```
+
+Run `source .venv/bin/activate` again when returning to the project in a new terminal. The `.venv/` directory is ignored by Git.
 
 ## Usage
 
 ### 1. Log in (once)
 
 ```bash
-psn-receipts login
+psn-transactions login
 ```
 
-A browser window opens (system Chrome with passkey support if available; Chromium as fallback). Sign in to PlayStation Store, complete any 2FA, then press **ENTER** in the terminal. Your session is saved to `~/.psn-receipts/auth.json` with owner-only permissions.
+A browser window opens (system Chrome with passkey support if available; Chromium as fallback). Sign in to PlayStation Store, complete any 2FA, then press **ENTER** in the terminal. Your session is saved to `~/.psn-transactions/auth.json` with owner-only permissions.
 
 ```bash
-psn-receipts login --force              # re-authenticate
-psn-receipts login --debug              # report session-cookie presence; values stay redacted
-psn-receipts login --locale en-au       # set region (default: en-us)
+psn-transactions login --force              # re-authenticate
+psn-transactions login --debug              # report session-cookie presence; values stay redacted
+psn-transactions login --locale en-au       # set region (default: en-us)
 ```
 
 Supported locales: `en-us` `en-gb` `en-au` `en-ca` `de-de` `fr-fr` `es-es` `it-it` `nl-nl` `pt-pt` `ja-jp` `ko-kr` `pt-br` `es-mx`
 
-The locale is saved to `~/.psn-receipts/config.json` and reused automatically by `fetch` and `export`.
+The locale is saved to `~/.psn-transactions/config.json` and reused automatically by `fetch` and `export`.
 
 ### 2. Fetch transaction history
 
 ```bash
-psn-receipts fetch
+psn-transactions fetch
 ```
 
 Downloads all transactions to `psn_transactions.json`. The completed export replaces any existing file atomically, so a failed fetch leaves the previous export intact. For testing, limit to one page (100 transactions):
 
 ```bash
-psn-receipts fetch --limit 1
-psn-receipts fetch --output my_history.json
+psn-transactions fetch --limit 1
+psn-transactions fetch --output my_transactions.json
 ```
 
 ### 3. Export to CSV
 
 ```bash
-psn-receipts export                   # basic export, no classification
-psn-receipts export --enrich          # also classify each item via PS Store API
-psn-receipts export --enrich --csv enriched.csv
+psn-transactions export                   # basic export, no classification
+psn-transactions export --enrich          # also classify each item via PS Store API
+psn-transactions export --enrich --csv enriched_transactions.csv
 ```
+
+The default CSV output is `psn_transactions.csv`.
 
 ## CSV columns
 
@@ -71,7 +79,7 @@ psn-receipts export --enrich --csv enriched.csv
 
 ### With `--enrich`
 
-Running `psn-receipts export --enrich` looks up each SKU against the PS Store API to classify your purchases. The following columns are always present in the CSV but are empty without `--enrich`:
+Running `psn-transactions export --enrich` looks up each SKU against the PS Store API to classify your purchases. The following columns are always present in the CSV but are empty without `--enrich`:
 
 | Column | Description |
 |---|---|
@@ -91,19 +99,22 @@ Running `psn-receipts export --enrich` looks up each SKU against the PS Store AP
 | In-Game Currency | `CURRENCY` content type |
 | Other | Unclassified |
 
-SKU lookups are cached in `~/.psn-receipts/sku_cache.json`.
+SKU lookups are cached in `~/.psn-transactions/sku_cache.json`.
 
 ## Development
 
+With the virtual environment activated, install the development extras and run the suite:
+
 ```bash
-python3 -m pip install -e '.[dev]'
-python3 -m pytest tests/ -v
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest tests/ -v
 ```
 
 ## Requirements
 
 - Python 3.11+
-- Playwright Chromium (`python3 -m playwright install chromium`)
+- Playwright Chromium (`python -m playwright install chromium` inside the virtual environment)
 - A PlayStation Network account (any region)
 
 ## Backlog
