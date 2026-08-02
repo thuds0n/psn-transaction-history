@@ -265,7 +265,7 @@ def test_fetch_all_does_not_write_partial_output_on_failure(tmp_path, monkeypatc
     monkeypatch.setattr(fetch.time, "sleep", lambda _: None)
     monkeypatch.setattr(fetch.cfg, "get_locale", lambda: cfg.DEFAULT_LOCALE)
 
-    with pytest.raises(PSNTransactionsError, match="GraphQL errors"):
+    with pytest.raises(PSNTransactionsError, match="did not authorise"):
         fetch.fetch_all(output_path=str(output_path), transport="browser")
 
     assert not output_path.exists()
@@ -393,6 +393,22 @@ def test_http_fetch_recommends_browser_fallback_when_rejected():
             session,
             "2025-12-31T23:59:59.999Z",
         )
+
+
+def test_http_graphql_auth_error_recommends_fallback_then_login():
+    session = FakeHTTPSession(
+        [FakeHTTPResponse({"errors": [{"message": "Access denied!"}]})]
+    )
+
+    with pytest.raises(PSNTransactionsError) as exc_info:
+        fetch._fetch_transaction_history_page_http(
+            session,
+            "2025-12-31T23:59:59.999Z",
+        )
+
+    message = str(exc_info.value)
+    assert "fetch --transport browser" in message
+    assert "login --force" in message
 
 
 def test_fetch_defaults_to_http_transport():

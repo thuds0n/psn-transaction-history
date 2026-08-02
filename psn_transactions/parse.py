@@ -1,4 +1,3 @@
-import csv
 import json
 import re
 import time
@@ -11,7 +10,14 @@ from rich.console import Console
 from rich.progress import Progress, BarColumn, SpinnerColumn, TextColumn, TaskProgressColumn
 
 from psn_transactions import config as cfg
+from psn_transactions.errors import PSNTransactionsError
 from psn_transactions.paths import app_dir
+from psn_transactions.storage import (
+    atomic_write_csv,
+    atomic_write_json,
+    secure_private_directory,
+    secure_private_file,
+)
 
 SKU_CACHE_FILE = app_dir() / "sku_cache.json"
 _CHIHIRO_TEMPLATE = "https://store.playstation.com/store/api/chihiro/00_09_000/container/{country}/{lang}/999/{sku}"
@@ -36,14 +42,34 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 def _load_cache() -> dict:
-    if SKU_CACHE_FILE.exists():
-        return json.loads(SKU_CACHE_FILE.read_text())
-    return {}
+    if not SKU_CACHE_FILE.exists():
+        return {}
+
+    secure_private_file(SKU_CACHE_FILE, "SKU cache")
+    try:
+        cache = json.loads(SKU_CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PSNTransactionsError(
+            f"Could not read SKU cache from {SKU_CACHE_FILE}: {exc}"
+        ) from exc
+
+    if not isinstance(cache, dict) or any(
+        not isinstance(sku, str) or not isinstance(info, dict)
+        for sku, info in cache.items()
+    ):
+        raise PSNTransactionsError(
+            f"SKU cache at {SKU_CACHE_FILE} must contain an object of SKU records."
+        )
+
+    # Older versions cached transient failures permanently. Drop them so the
+    # next enriched export can retry the lookup.
+    return {sku: info for sku, info in cache.items() if "error" not in info}
 
 
 def _save_cache(cache: dict) -> None:
-    SKU_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SKU_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    secure_private_directory(SKU_CACHE_FILE.parent, "SKU cache")
+    atomic_write_json(SKU_CACHE_FILE, cache, description="SKU cache")
+    secure_private_file(SKU_CACHE_FILE, "SKU cache")
 
 
 def _sku_base(sku: str) -> str:
@@ -54,30 +80,45 @@ def _sku_base(sku: str) -> str:
 def _lookup_sku(sku: str, cache: dict) -> dict:
     if not sku:
         return {}
-    if sku in cache:
-        return cache[sku]
+    cached = cache.get(sku)
+    if isinstance(cached, dict) and "error" not in cached:
+        return cached
+    cache.pop(sku, None)
 
     url = _chihiro_url(_sku_base(sku))
     try:
-        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200:
-            data = r.json()
-            attrs = data.get("attributes", {}) or data
-            gct = (attrs.get("game_content_type") or "").upper()
-            info = {
-                "content_type": gct,
-                "top_category": attrs.get("top_category", ""),
-                "is_addon": gct in {"ADDON", "DLC", "ADD_ON", "ADD_ON_CONTENT"},
-                "is_bundle": "BUNDLE" in gct,
-            }
-        else:
-            info = {"error": r.status_code}
-    except Exception as e:
-        info = {"error": str(e)}
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        if response.status_code != 200:
+            return {"error": response.status_code}
 
-    cache[sku] = info
-    time.sleep(0.25)
-    return info
+        try:
+            data = response.json()
+        except ValueError as exc:
+            return {"error": f"invalid JSON: {exc}"}
+        if not isinstance(data, dict):
+            return {"error": "unexpected response shape"}
+
+        attrs = data.get("attributes", {}) or data
+        if not isinstance(attrs, dict):
+            return {"error": "unexpected attributes shape"}
+        raw_content_type = attrs.get("game_content_type")
+        gct = raw_content_type.upper() if isinstance(raw_content_type, str) else ""
+        info = {
+            "content_type": gct,
+            "top_category": attrs.get("top_category", ""),
+            "is_addon": gct in {"ADDON", "DLC", "ADD_ON", "ADD_ON_CONTENT"},
+            "is_bundle": "BUNDLE" in gct,
+        }
+        cache[sku] = info
+        return info
+    except requests.RequestException as exc:
+        return {"error": str(exc)}
+    finally:
+        time.sleep(0.25)
 
 
 # ---------------------------------------------------------------------------
@@ -198,24 +239,55 @@ def _flatten(txs: list, cache: dict, enrich: bool) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _load_transactions(json_path: str) -> list[dict]:
+    input_path = Path(json_path)
+    try:
+        payload = json.loads(input_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise PSNTransactionsError(
+            f"Transaction JSON not found at {input_path}. Run `psn-transactions fetch` first."
+        ) from exc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PSNTransactionsError(
+            f"Could not read transaction JSON from {input_path}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, list):
+        raise PSNTransactionsError(
+            f"Transaction JSON at {input_path} must contain a list of transactions."
+        )
+    if any(not isinstance(transaction, dict) for transaction in payload):
+        raise PSNTransactionsError(
+            f"Transaction JSON at {input_path} contains a non-object transaction."
+        )
+    return payload
+
+
 def export(
     json_path: str = "psn_transactions.json",
     csv_path: str = "psn_transactions.csv",
     enrich: bool = False,
 ) -> None:
-    txs = json.loads(Path(json_path).read_text())
+    txs = _load_transactions(json_path)
     console.print(f"Loaded {len(txs)} transactions from {json_path}")
 
-    cache = _load_cache()
+    cache = _load_cache() if enrich else {}
 
     if enrich:
         # Collect unique SKUs not yet in cache
-        skus = {
-            p["skuId"]
-            for t in txs
-            for p in (t.get("purchaseDetails") or {}).get("productPurchases", [])
-            if p.get("skuId") and p["skuId"] not in cache
-        }
+        try:
+            skus = {
+                product["skuId"]
+                for transaction in txs
+                for product in (transaction.get("purchaseDetails") or {}).get(
+                    "productPurchases", []
+                )
+                if product.get("skuId") and product["skuId"] not in cache
+            }
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise PSNTransactionsError(
+                f"Transaction JSON at {json_path} has an unexpected purchase structure."
+            ) from exc
 
         if skus:
             console.print(f"Looking up {len(skus)} new SKUs...")
@@ -236,11 +308,13 @@ def export(
             _save_cache(cache)
             console.print(f"✓ Cache saved ({len(cache)} SKUs)")
 
-    rows = _flatten(txs, cache, enrich)
+    try:
+        rows = _flatten(txs, cache, enrich)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        raise PSNTransactionsError(
+            f"Transaction JSON at {json_path} has an unexpected transaction structure."
+        ) from exc
 
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
+    atomic_write_csv(Path(csv_path), rows, CSV_FIELDS)
 
     console.print(f"✓ Saved [bold]{len(rows)}[/bold] rows to {csv_path}")
