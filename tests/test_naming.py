@@ -4,7 +4,7 @@ import inspect
 import tomllib
 from pathlib import Path
 
-from psn_transactions import parse, paths
+from psn_transactions import export, fetch, paths
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -21,11 +21,16 @@ def test_distribution_and_cli_names_match_contract():
     }
 
 
-def test_export_defaults_match_contract():
-    parameters = inspect.signature(parse.export).parameters
+def test_fetch_and_export_defaults_match_contract():
+    fetch_parameters = inspect.signature(fetch.fetch_all).parameters
+    export_parameters = inspect.signature(export.export_csv).parameters
+    enrich_parameters = inspect.signature(export.enrich_csv).parameters
 
-    assert parameters["json_path"].default == "psn_transactions.json"
-    assert parameters["csv_path"].default == "psn_transactions.csv"
+    assert fetch_parameters["output_path"].default == "psn_transactions_raw.json"
+    assert export_parameters["json_path"].default == "psn_transactions_raw.json"
+    assert export_parameters["csv_path"].default == "psn_transactions.csv"
+    assert enrich_parameters["json_path"].default == "psn_transactions_raw.json"
+    assert enrich_parameters["csv_path"].default == "psn_transactions_enriched.csv"
 
 
 def test_app_directory_matches_contract(tmp_path, monkeypatch):

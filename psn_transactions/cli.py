@@ -4,7 +4,7 @@ from typing import Optional
 from psn_transactions import config as cfg
 from psn_transactions.errors import PSNTransactionsError
 
-app = typer.Typer(help="Export your PlayStation Network transaction history.")
+app = typer.Typer(help="Fetch and export your PlayStation Network transaction history.")
 
 
 @app.command()
@@ -20,7 +20,7 @@ def login(
         "--locale",
         help=(
             "PlayStation Store region, e.g. en-au, en-us, en-gb. "
-            f"Saved to config and reused by fetch/export. "
+            f"Saved to config and reused by fetch/enrich. "
             f"Supported: {', '.join(cfg.SUPPORTED_LOCALES)}"
         ),
     ),
@@ -46,7 +46,11 @@ def login(
 
 @app.command()
 def fetch(
-    output: str = typer.Option("psn_transactions.json", "--output", help="Path to save raw JSON."),
+    output: str = typer.Option(
+        "psn_transactions_raw.json",
+        "--output",
+        help="Path to save the raw transaction snapshot.",
+    ),
     limit: Optional[int] = typer.Option(
         None, "--limit",
         help="Max pages to fetch (1 page ≈ 100 transactions). Useful for testing.",
@@ -72,7 +76,7 @@ def fetch(
         help="Fetch transport: http (default) or browser fallback.",
     ),
 ) -> None:
-    """Fetch transaction history from PSN and save to JSON."""
+    """Fetch transaction history from PSN and save a raw JSON snapshot."""
     from psn_transactions.fetch import fetch_all
     try:
         fetch_all(
@@ -88,27 +92,109 @@ def fetch(
         raise typer.Exit(code=1)
 
 
-@app.command()
-def export(
-    input: str = typer.Option("psn_transactions.json", "--input", help="Path to raw JSON from fetch."),
-    csv: str = typer.Option("psn_transactions.csv", "--csv", help="Path for output CSV."),
-    enrich: bool = typer.Option(
-        False,
-        "--enrich",
-        help="Look up current PS Store metadata and classify purchases.",
-    ),
-) -> None:
-    """Parse transaction JSON and export to CSV."""
-    from psn_transactions.parse import export as _export
+def _export_csv(input_path: str, output_path: str) -> None:
+    from psn_transactions.export import export_csv
+
     try:
-        _export(
-            json_path=input,
-            csv_path=csv,
-            enrich=enrich,
+        export_csv(json_path=input_path, csv_path=output_path)
+    except PSNTransactionsError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+def _enrich_csv(
+    input_path: str,
+    output_path: str,
+    *,
+    paid_only: bool,
+    refresh: bool,
+    cache_only: bool,
+    summary: bool,
+) -> None:
+    from psn_transactions.export import enrich_csv
+
+    try:
+        enrich_csv(
+            json_path=input_path,
+            csv_path=output_path,
+            paid_only=paid_only,
+            refresh=refresh,
+            cache_only=cache_only,
+            summary=summary,
         )
     except PSNTransactionsError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1)
+
+
+@app.command()
+def export(
+    input: str = typer.Option(
+        "psn_transactions_raw.json",
+        "--input",
+        help="Path to raw JSON from fetch.",
+    ),
+    output: str = typer.Option(
+        "psn_transactions.csv",
+        "--output",
+        "--csv",
+        help="Path for the output CSV.",
+    ),
+) -> None:
+    """Export raw transaction JSON to CSV without Store lookups."""
+    _export_csv(input, output)
+
+
+@app.command()
+def enrich(
+    input: str = typer.Option(
+        "psn_transactions_raw.json",
+        "--input",
+        help="Path to raw JSON from fetch.",
+    ),
+    output: str = typer.Option(
+        "psn_transactions_enriched.csv",
+        "--output",
+        "--csv",
+        help="Path for the enriched output CSV.",
+    ),
+    paid_only: bool = typer.Option(
+        False,
+        "--paid-only",
+        help="Include only product items with a positive item-level total.",
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Repeat Store lookups instead of reusing cached results.",
+    ),
+    cache_only: bool = typer.Option(
+        False,
+        "--cache-only",
+        help="Use cached Store metadata without making network requests.",
+    ),
+    summary: bool = typer.Option(
+        False,
+        "--summary",
+        help="Print detailed privacy-safe processing and classification counts.",
+    ),
+) -> None:
+    """Export to CSV with current PS Store metadata and classification."""
+    if refresh and cache_only:
+        typer.secho(
+            "--refresh and --cache-only cannot be used together.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+    _enrich_csv(
+        input,
+        output,
+        paid_only=paid_only,
+        refresh=refresh,
+        cache_only=cache_only,
+        summary=summary,
+    )
 
 
 if __name__ == "__main__":
