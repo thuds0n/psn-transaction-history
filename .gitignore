@@ -23,6 +23,9 @@ artifacts/
 exports/
 *.xlsx
 
+# Personal helper scripts that are intentionally not part of the project
+.local-tools/
+
 # Editor and OS files
 .DS_Store
 .idea/

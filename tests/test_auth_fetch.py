@@ -9,7 +9,7 @@ import requests
 from playwright.sync_api import Error as PlaywrightError
 from typer.testing import CliRunner
 
-from psn_transactions import auth, config as cfg, fetch, parse, storage
+from psn_transactions import auth, config as cfg, enrich, fetch, storage
 from psn_transactions.cli import app
 from psn_transactions.errors import PSNTransactionsError
 
@@ -1036,7 +1036,7 @@ def test_fetch_cli_forwards_date_range(monkeypatch):
     assert result.exit_code == 0
     assert calls == [
         {
-            "output_path": "psn_transactions.json",
+            "output_path": "psn_transactions_raw.json",
             "limit": None,
             "start_date": "2025-01-01",
             "end_date": "2025-12-31",
@@ -1130,13 +1130,13 @@ def test_login_cli_forwards_manual_confirmation(monkeypatch):
     ]
 
 
-def test_config_and_parse_share_default_locale(tmp_path, monkeypatch):
+def test_config_and_enrichment_share_default_locale(tmp_path, monkeypatch):
     config_file = tmp_path / "config.json"
 
     monkeypatch.setattr(cfg, "CONFIG_FILE", config_file)
 
     assert cfg.get_locale() == cfg.DEFAULT_LOCALE
-    assert parse._chihiro_url("UP0001-CUSA00001_00-GAME") == (
+    assert enrich._chihiro_url("UP0001-CUSA00001_00-GAME") == (
         "https://store.playstation.com/store/api/chihiro/00_09_000/container/US/en/999/"
         "UP0001-CUSA00001_00-GAME"
     )

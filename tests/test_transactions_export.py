@@ -9,16 +9,23 @@ import pytest
 import requests
 from typer.testing import CliRunner
 
-from psn_transactions import parse, storage
+from psn_transactions import enrich as store_enrich
+from psn_transactions import export as csv_export
+from psn_transactions import storage
 from psn_transactions.cli import app
 from psn_transactions.errors import PSNTransactionsError
-from psn_transactions.parse import (
-    CSV_FIELDS,
+from psn_transactions.classify import (
     _classify,
     _classify_detailed,
-    _flatten,
+)
+from psn_transactions.enrich import (
     _normalise_store_metadata,
     _sku_base,
+)
+from psn_transactions.export import (
+    CORE_CSV_FIELDS,
+    ENRICHED_CSV_FIELDS,
+    _flatten,
 )
 
 
@@ -216,10 +223,10 @@ class TestClassify:
         assert is_ps_plus is None
 
     def test_transaction_metadata_identifies_subscription(self):
-        category, is_ps_plus, source = _classify_detailed(
+        category, is_ps_plus, source, evidence = _classify_detailed(
             "Recurring membership",
             "SUBSCRIPTION-SKU",
-            tx_total=1299,
+            item_total=1299,
             item_original=1299,
             info={},
             sku_type="SUBSCRIPTION",
@@ -227,6 +234,21 @@ class TestClassify:
         assert category == "Subscription"
         assert is_ps_plus is None
         assert source == "transaction"
+        assert evidence == "sku_type=SUBSCRIPTION"
+
+    def test_heuristic_classification_names_the_matching_evidence(self):
+        category, is_ps_plus, source, evidence = _classify_detailed(
+            "Example Season Pass",
+            "UP001-EXAMPLE",
+            item_total=999,
+            item_original=999,
+            info={},
+        )
+
+        assert category == "DLC / Add-on"
+        assert is_ps_plus is None
+        assert source == "heuristic"
+        assert evidence == 'product name contains "season pass"'
 
 
 class TestStoreMetadataNormalisation:
@@ -255,7 +277,6 @@ class TestStoreMetadataNormalisation:
         metadata = _normalise_store_metadata({"content_type": "1"})
 
         assert metadata["content_type"] == ""
-
 
 # ---------------------------------------------------------------------------
 # _flatten
@@ -309,6 +330,26 @@ class TestFlatten:
         assert rows[0]["enrichment_status"] == "success"
         assert rows[0]["classification_source"] == "store_api"
 
+    def test_product_row_includes_stable_item_id_and_numeric_amounts(self):
+        product = make_product(
+            "Some Game",
+            "UP001-CUSA00001_00-GAME-E001",
+            paid_cents=999,
+            original_cents=1299,
+        )
+        product["orderItemId"] = "ORDER001"
+        product["discount"] = 300
+        product["tax"] = 100
+        tx = make_tx(tx_total=999, products=[product])
+
+        rows = _flatten([tx], cache={}, enrich=False)
+
+        assert rows[0]["order_item_id"] == "ORDER001"
+        assert rows[0]["paid_minor"] == 999
+        assert rows[0]["original_minor"] == 1299
+        assert rows[0]["discount_minor"] == 300
+        assert rows[0]["tax_minor"] == 100
+
     def test_enrich_true_classifies_ps_plus_pack(self):
         product = make_product(
             "Marathon Digital Bundle for PlayStation®Plus",
@@ -320,15 +361,15 @@ class TestFlatten:
         assert rows[0]["category"] == "PS Plus Pack"
         assert rows[0]["is_ps_plus"] is True
 
-    def test_enrich_false_leaves_enriched_columns_empty(self):
+    def test_basic_rows_omit_enriched_columns(self):
         product = make_product("Some Game", "UP001-CUSA00001_00-GAME-E001", paid_cents=999, original_cents=999)
         tx = make_tx(tx_total=999, tx_original=999, products=[product])
         rows = _flatten([tx], cache={}, enrich=False)
-        assert rows[0]["category"] == ""
-        assert rows[0]["content_type"] == ""
-        assert rows[0]["is_ps_plus"] == ""
-        assert rows[0]["enrichment_status"] == ""
-        assert rows[0]["classification_source"] == ""
+        assert "category" not in rows[0]
+        assert "content_type" not in rows[0]
+        assert "is_ps_plus" not in rows[0]
+        assert "enrichment_status" not in rows[0]
+        assert "classification_source" not in rows[0]
 
     def test_live_like_nullable_transaction_original_price_does_not_crash(self):
         product = make_product(
@@ -345,17 +386,46 @@ class TestFlatten:
         assert rows[0]["is_ps_plus"] is True
         assert rows[0]["classification_source"] == "product_name"
 
+    def test_ps_plus_classification_uses_item_total_in_mixed_transaction(self):
+        plus_item = make_product(
+            "Some Game - PlayStation Plus",
+            "UP001-CUSA00001_00-PLUS-E001",
+            paid_cents=0,
+            original_cents=1999,
+        )
+        paid_item = make_product(
+            "Paid Item",
+            "UP001-CUSA00002_00-PAID-E001",
+            paid_cents=999,
+            original_cents=999,
+        )
+        tx = make_tx(tx_total=999, products=[plus_item, paid_item])
+
+        rows = _flatten([tx], cache={}, enrich=True)
+
+        plus_row = next(row for row in rows if row["product"].endswith("Plus"))
+        assert plus_row["category"] == "PS Plus Monthly"
+        assert plus_row["is_ps_plus"] is True
+
     def test_date_formatted_as_yyyy_mm_dd_hhmm(self):
         product = make_product("Some Game", "UP001-CUSA00001_00-GAME-E001")
         tx = make_tx(date="2025-03-30T09:31:25.285Z", products=[product])
         rows = _flatten([tx], cache={}, enrich=False)
         assert rows[0]["date"] == "2025-03-30 09:31"
 
-    def test_all_csv_fields_present_in_output(self):
+    def test_core_fields_present_in_basic_output(self):
         product = make_product("Some Game", "UP001-CUSA00001_00-GAME-E001")
         tx = make_tx(products=[product])
         rows = _flatten([tx], cache={}, enrich=False)
-        assert set(rows[0].keys()) == set(CSV_FIELDS)
+        assert list(rows[0]) == CORE_CSV_FIELDS
+
+    def test_enriched_fields_present_in_enriched_output(self):
+        product = make_product("Some Game", "UP001-CUSA00001_00-GAME-E001")
+        tx = make_tx(products=[product])
+
+        rows = _flatten([tx], cache={}, enrich=True)
+
+        assert list(rows[0]) == ENRICHED_CSV_FIELDS
 
     def test_transaction_id_populated(self):
         product = make_product("Some Game", "UP001-CUSA00001_00-GAME-E001")
@@ -387,13 +457,13 @@ class TestExportIntegrity:
             )
         )
 
-        parse.export(json_path=str(input_path), csv_path=str(output_path))
+        csv_export.export_csv(json_path=str(input_path), csv_path=str(output_path))
 
         with output_path.open(newline="", encoding="utf-8") as output_file:
             rows = list(csv.DictReader(output_file))
         assert len(rows) == 1
         assert rows[0]["product"] == "Some Game"
-        assert set(rows[0]) == set(CSV_FIELDS)
+        assert list(rows[0]) == CORE_CSV_FIELDS
 
     @pytest.mark.parametrize(
         ("contents", "message"),
@@ -410,7 +480,7 @@ class TestExportIntegrity:
         input_path.write_text(contents)
 
         with pytest.raises(PSNTransactionsError, match=message):
-            parse.export(
+            csv_export.export_csv(
                 json_path=str(input_path),
                 csv_path=str(tmp_path / "transactions.csv"),
             )
@@ -430,7 +500,10 @@ class TestExportIntegrity:
         )
 
         with pytest.raises(PSNTransactionsError, match="Could not save CSV export"):
-            parse.export(json_path=str(input_path), csv_path=str(output_path))
+            csv_export.export_csv(
+                json_path=str(input_path),
+                csv_path=str(output_path),
+            )
 
         assert output_path.read_text() == "existing export"
         assert list(tmp_path.glob(".transactions.csv.*.tmp")) == []
@@ -441,12 +514,11 @@ class TestExportIntegrity:
         cache_file = tmp_path / "sku_cache.json"
         input_path.write_text(json.dumps([make_tx()]))
         cache_file.write_text("not-json")
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
 
-        parse.export(
+        csv_export.export_csv(
             json_path=str(input_path),
             csv_path=str(output_path),
-            enrich=False,
         )
 
         assert output_path.exists()
@@ -498,51 +570,222 @@ class TestExportIntegrity:
             def get(self, *args, **kwargs):
                 return FakeResponse()
 
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
-        monkeypatch.setattr(parse.cfg, "get_locale", lambda: "en-us")
-        monkeypatch.setattr(parse, "_store_session", FakeSession)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-us")
+        monkeypatch.setattr(store_enrich, "_store_session", FakeSession)
 
-        parse.export(
+        csv_export.enrich_csv(
             json_path=str(input_path),
             csv_path=str(output_path),
-            enrich=True,
         )
 
         with output_path.open(newline="", encoding="utf-8") as output_file:
             row = next(csv.DictReader(output_file))
+        assert list(row) == ENRICHED_CSV_FIELDS
         assert row["category"] == "DLC / Add-on"
         assert row["content_type"] == "ADD_ON"
         assert row["platform"] == "PS5"
         assert row["publisher"] == "Example Publisher"
         assert row["enrichment_status"] == "success"
+        assert row["enrichment_detail"] == ""
         assert row["classification_source"] == "store_api"
+        assert row["classification_evidence"] == "content_type=ADD_ON"
         assert "success: 1" in capsys.readouterr().out
         assert cache_file.exists()
 
-    def test_export_cli_forwards_enrichment(self, monkeypatch):
+    def test_paid_only_filters_rows_before_store_lookups(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        input_path = tmp_path / "transactions.json"
+        output_path = tmp_path / "transactions.csv"
+        cache_file = tmp_path / ".psn-transactions" / "sku_cache.json"
+        paid_product = make_product(
+            "Paid Item",
+            "UP001-CUSA00001_00-PAID-E001",
+            paid_cents=999,
+            original_cents=999,
+        )
+        free_product = make_product(
+            "Free Item",
+            "UP001-CUSA00002_00-FREE-E001",
+            paid_cents=0,
+            original_cents=499,
+        )
+        refunded_product = make_product(
+            "Refunded Item",
+            "UP001-CUSA00003_00-REFUND-E001",
+            paid_cents=-499,
+            original_cents=499,
+        )
+        input_path.write_text(
+            json.dumps(
+                [
+                    make_tx(
+                        tx_total=999,
+                        products=[paid_product, free_product, refunded_product],
+                    ),
+                    make_tx(tx_id="NONPRODUCT", products=[]),
+                ]
+            )
+        )
+        calls = []
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_fetch(sku, session=None):
+            calls.append(sku)
+            return {
+                "status": "success",
+                "metadata": {"content_type": "FULL_GAME"},
+                "cached": False,
+            }
+
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-us")
+        monkeypatch.setattr(store_enrich, "_store_session", FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+
+        csv_export.enrich_csv(
+            json_path=str(input_path),
+            csv_path=str(output_path),
+            paid_only=True,
+            summary=True,
+        )
+
+        with output_path.open(newline="", encoding="utf-8") as output_file:
+            rows = list(csv.DictReader(output_file))
+        assert len(rows) == 1
+        assert rows[0]["product"] == "Paid Item"
+        assert calls == ["UP001-CUSA00001_00-PAID-E001"]
+        output = capsys.readouterr().out
+        assert "included: 1" in output
+        assert "zero-cost skipped: 1" in output
+        assert "negative-total skipped: 1" in output
+        assert "non-product transactions skipped: 1" in output
+        assert "Detailed summary" in output
+        assert "product rows: 3" in output
+        assert "requests: 1" in output
+        assert "Classification sources — store api: 1" in output
+
+    def test_export_cli_uses_raw_input_without_enrichment(self, monkeypatch):
         calls = []
         monkeypatch.setattr(
-            parse,
-            "export",
+            csv_export,
+            "export_csv",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        result = CliRunner().invoke(app, ["export"])
+
+        assert result.exit_code == 0
+        assert calls == [
+            {
+                "json_path": "psn_transactions_raw.json",
+                "csv_path": "psn_transactions.csv",
+            }
+        ]
+
+    def test_enrich_cli_uses_separate_output(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            csv_export,
+            "enrich_csv",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        result = CliRunner().invoke(app, ["enrich"])
+
+        assert result.exit_code == 0
+        assert calls == [
+            {
+                "json_path": "psn_transactions_raw.json",
+                "csv_path": "psn_transactions_enriched.csv",
+                "paid_only": False,
+                "refresh": False,
+                "cache_only": False,
+                "summary": False,
+            }
+        ]
+
+    def test_enrich_cli_forwards_paid_and_cache_options(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            csv_export,
+            "enrich_csv",
             lambda **kwargs: calls.append(kwargs),
         )
 
         result = CliRunner().invoke(
             app,
-            [
-                "export",
-                "--enrich",
-            ],
+            ["enrich", "--paid-only", "--refresh", "--summary"],
         )
 
         assert result.exit_code == 0
         assert calls == [
             {
-                "json_path": "psn_transactions.json",
-                "csv_path": "psn_transactions.csv",
-                "enrich": True,
+                "json_path": "psn_transactions_raw.json",
+                "csv_path": "psn_transactions_enriched.csv",
+                "paid_only": True,
+                "refresh": True,
+                "cache_only": False,
+                "summary": True,
             }
         ]
+
+    def test_enrich_rejects_refresh_with_cache_only(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            csv_export,
+            "enrich_csv",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            ["enrich", "--refresh", "--cache-only"],
+        )
+
+        assert result.exit_code == 1
+        assert "cannot be used together" in result.output
+        assert calls == []
+
+    def test_export_rejects_removed_enrich_option(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            csv_export,
+            "export_csv",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        result = CliRunner().invoke(app, ["export", "--enrich"])
+
+        assert result.exit_code != 0
+        assert "No such option: --enrich" in result.output
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("command", "output_name"),
+        [
+            ("export", "psn_transactions.csv"),
+            ("enrich", "psn_transactions_enriched.csv"),
+        ],
+    )
+    def test_commands_do_not_fall_back_to_old_raw_filename(
+        self, tmp_path, monkeypatch, command, output_name
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "psn_transactions.json").write_text("[]")
+
+        result = CliRunner().invoke(app, [command])
+
+        assert result.exit_code == 1
+        assert "psn_transactions_raw.json" in result.output
+        assert not (tmp_path / output_name).exists()
 
     def test_export_cli_reports_missing_input_without_traceback(self, tmp_path):
         missing_path = tmp_path / "missing.json"
@@ -560,21 +803,21 @@ class TestExportIntegrity:
 class TestSkuCacheIntegrity:
     def test_cache_is_private_and_atomic(self, tmp_path, monkeypatch):
         cache_file = tmp_path / ".psn-transactions" / "sku_cache.json"
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
 
-        cache = parse._empty_cache()
-        monkeypatch.setattr(parse.cfg, "get_locale", lambda: "en-au")
-        parse._record_cache_result(
+        cache = store_enrich._empty_cache()
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-au")
+        store_enrich._record_cache_result(
             "SKU001",
             cache,
             "success",
             {"content_type": "FULL_GAME"},
         )
-        parse._save_cache(cache)
+        store_enrich._save_cache(cache)
 
         saved = json.loads(cache_file.read_text())
-        assert saved["schema_version"] == parse.CACHE_SCHEMA_VERSION
-        assert saved["source"] == parse.CACHE_SOURCE
+        assert saved["schema_version"] == store_enrich.CACHE_SCHEMA_VERSION
+        assert saved["source"] == store_enrich.CACHE_SOURCE
         assert saved["entries"]["en-au|SKU001"]["status"] == "success"
         assert saved["entries"]["en-au|SKU001"]["metadata"] == {
             "content_type": "FULL_GAME"
@@ -585,15 +828,15 @@ class TestSkuCacheIntegrity:
     def test_malformed_cache_reports_user_facing_error(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "sku_cache.json"
         cache_file.write_text("not-json")
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
 
         with pytest.raises(PSNTransactionsError, match="Could not read SKU cache"):
-            parse._load_cache()
+            store_enrich._load_cache()
 
     def test_cache_write_failure_preserves_existing_cache(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "sku_cache.json"
         cache_file.write_text(json.dumps({"existing": {"content_type": "GAME"}}))
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
         monkeypatch.setattr(
             storage.os,
             "replace",
@@ -603,7 +846,7 @@ class TestSkuCacheIntegrity:
         )
 
         with pytest.raises(PSNTransactionsError, match="Could not save SKU cache"):
-            parse._save_cache(parse._empty_cache())
+            store_enrich._save_cache(store_enrich._empty_cache())
 
         assert json.loads(cache_file.read_text()) == {
             "existing": {"content_type": "GAME"}
@@ -613,9 +856,9 @@ class TestSkuCacheIntegrity:
     def test_legacy_cached_failures_are_retried(self, tmp_path, monkeypatch):
         cache_file = tmp_path / "sku_cache.json"
         cache_file.write_text(json.dumps({"SKU001": {"error": 503}}))
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
 
-        assert parse._load_cache() == parse._empty_cache()
+        assert store_enrich._load_cache() == store_enrich._empty_cache()
 
     def test_transient_lookup_failure_is_not_cached_and_retries(self, monkeypatch):
         class FakeResponse:
@@ -634,14 +877,14 @@ class TestSkuCacheIntegrity:
         )
         calls = []
         monkeypatch.setattr(
-            parse.requests,
+            store_enrich.requests,
             "get",
             lambda *args, **kwargs: calls.append((args, kwargs)) or next(responses),
         )
-        cache = parse._empty_cache()
+        cache = store_enrich._empty_cache()
 
-        first = parse._lookup_sku("SKU001", cache)
-        second = parse._lookup_sku("SKU001", cache)
+        first = store_enrich._lookup_sku("SKU001", cache)
+        second = store_enrich._lookup_sku("SKU001", cache)
 
         assert first["status"] == "temporary_failure"
         assert second["status"] == "success"
@@ -651,15 +894,15 @@ class TestSkuCacheIntegrity:
 
     def test_network_failure_is_not_cached(self, monkeypatch):
         monkeypatch.setattr(
-            parse.requests,
+            store_enrich.requests,
             "get",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 requests.ConnectionError("offline")
             ),
         )
-        cache = parse._empty_cache()
+        cache = store_enrich._empty_cache()
 
-        result = parse._lookup_sku("SKU001", cache)
+        result = store_enrich._lookup_sku("SKU001", cache)
 
         assert result["status"] == "temporary_failure"
         assert "offline" in result["detail"]
@@ -671,14 +914,14 @@ class TestSkuCacheIntegrity:
 
         calls = []
         monkeypatch.setattr(
-            parse.requests,
+            store_enrich.requests,
             "get",
             lambda *args, **kwargs: calls.append((args, kwargs)) or FakeResponse(),
         )
-        cache = parse._empty_cache()
+        cache = store_enrich._empty_cache()
 
-        first = parse._lookup_sku("SKU001", cache)
-        second = parse._lookup_sku("SKU001", cache)
+        first = store_enrich._lookup_sku("SKU001", cache)
+        second = store_enrich._lookup_sku("SKU001", cache)
 
         assert first["status"] == "not_found"
         assert first["cached"] is False
@@ -693,11 +936,11 @@ class TestSkuCacheIntegrity:
             def json(self):
                 return {"content_type": "1"}
 
-        monkeypatch.setattr(parse.requests, "get", lambda *args, **kwargs: FakeResponse())
-        monkeypatch.setattr(parse.cfg, "get_locale", lambda: "en-us")
-        cache = parse._empty_cache()
+        monkeypatch.setattr(store_enrich.requests, "get", lambda *args, **kwargs: FakeResponse())
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-us")
+        cache = store_enrich._empty_cache()
 
-        result = parse._lookup_sku("SKU001", cache)
+        result = store_enrich._lookup_sku("SKU001", cache)
 
         assert result["status"] == "no_metadata"
         assert cache["entries"]["en-us|SKU001"]["status"] == "no_metadata"
@@ -708,14 +951,14 @@ class TestSkuCacheIntegrity:
 
         calls = []
         monkeypatch.setattr(
-            parse.requests,
+            store_enrich.requests,
             "get",
             lambda *args, **kwargs: calls.append((args, kwargs)) or FakeResponse(),
         )
-        cache = parse._empty_cache()
+        cache = store_enrich._empty_cache()
 
-        first = parse._lookup_sku("SKU001", cache)
-        second = parse._lookup_sku("SKU001", cache)
+        first = store_enrich._lookup_sku("SKU001", cache)
+        second = store_enrich._lookup_sku("SKU001", cache)
 
         assert first["status"] == "no_metadata"
         assert second["status"] == "no_metadata"
@@ -724,25 +967,25 @@ class TestSkuCacheIntegrity:
 
     def test_cache_is_scoped_by_locale(self, monkeypatch):
         locale = ["en-au"]
-        monkeypatch.setattr(parse.cfg, "get_locale", lambda: locale[0])
-        cache = parse._empty_cache()
-        parse._record_cache_result(
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: locale[0])
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
             "SKU001", cache, "success", {"content_type": "FULL_GAME"}
         )
 
-        assert parse._cached_result("SKU001", cache) is not None
+        assert store_enrich._cached_result("SKU001", cache) is not None
         locale[0] = "en-gb"
-        assert parse._cached_result("SKU001", cache) is None
+        assert store_enrich._cached_result("SKU001", cache) is None
 
     def test_expired_negative_cache_result_is_retried(self, monkeypatch):
         now = datetime(2026, 8, 2, tzinfo=timezone.utc)
-        monkeypatch.setattr(parse, "_utc_now", lambda: now)
-        cache = parse._empty_cache()
-        parse._record_cache_result("SKU001", cache, "not_found", {})
+        monkeypatch.setattr(store_enrich, "_utc_now", lambda: now)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result("SKU001", cache, "not_found", {})
 
-        later = now + parse.NOT_FOUND_CACHE_TTL + timedelta(seconds=1)
+        later = now + store_enrich.NOT_FOUND_CACHE_TTL + timedelta(seconds=1)
 
-        assert parse._cached_result("SKU001", cache, now=later) is None
+        assert store_enrich._cached_result("SKU001", cache, now=later) is None
         assert cache["entries"] == {}
 
 
@@ -768,11 +1011,11 @@ class TestSerialEnrichment:
                 "cached": False,
             }
 
-        monkeypatch.setattr(parse, "_store_session", self.FakeSession)
-        monkeypatch.setattr(parse, "_fetch_sku", fake_fetch)
-        cache = parse._empty_cache()
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+        cache = store_enrich._empty_cache()
 
-        results = parse._enrich_skus(
+        results = store_enrich._enrich_skus(
             {"SKU001", "SKU002", "SKU003", "SKU004"}, cache
         )
 
@@ -792,11 +1035,11 @@ class TestSerialEnrichment:
                 "cached": False,
             }
 
-        monkeypatch.setattr(parse, "_store_session", self.FakeSession)
-        monkeypatch.setattr(parse, "_fetch_sku", fake_fetch)
-        cache = parse._empty_cache()
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+        cache = store_enrich._empty_cache()
 
-        results = parse._enrich_skus(
+        results = store_enrich._enrich_skus(
             {"UP001-GAME-E001", "UP001-GAME-E002"},
             cache,
         )
@@ -804,6 +1047,66 @@ class TestSerialEnrichment:
         assert len(calls) == 1
         assert len(results) == 2
         assert len(cache["entries"]) == 1
+
+    def test_refresh_bypasses_successful_cache(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(sku, session=None):
+            calls.append(sku)
+            return {
+                "status": "success",
+                "metadata": {"content_type": "FULL_GAME"},
+                "cached": False,
+            }
+
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001",
+            cache,
+            "success",
+            {"content_type": "ADD_ON"},
+        )
+
+        results = store_enrich._enrich_skus(
+            {"SKU001"},
+            cache,
+            cache_mode=store_enrich.CacheMode.REFRESH,
+        )
+
+        assert calls == ["SKU001"]
+        assert results["SKU001"]["metadata"]["content_type"] == "FULL_GAME"
+        assert (
+            cache["entries"][store_enrich._cache_key("SKU001")]["metadata"]["content_type"]
+            == "FULL_GAME"
+        )
+
+    def test_cache_only_uses_hits_and_marks_misses_without_session(self, monkeypatch):
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001",
+            cache,
+            "success",
+            {"content_type": "FULL_GAME"},
+        )
+        monkeypatch.setattr(
+            store_enrich,
+            "_store_session",
+            lambda: (_ for _ in ()).throw(AssertionError("network session opened")),
+        )
+
+        results = store_enrich._enrich_skus(
+            {"SKU001", "SKU002"},
+            cache,
+            cache_mode=store_enrich.CacheMode.ONLY,
+        )
+
+        assert results["SKU001"]["status"] == "success"
+        assert results["SKU001"]["cached"] is True
+        assert results["SKU002"]["status"] == "cache_miss"
+        assert results["SKU002"]["cached"] is False
+        assert results["SKU002"]["detail"] == "No reusable cached metadata"
 
     def test_interrupt_saves_completed_cache_progress(
         self, tmp_path, monkeypatch
@@ -821,13 +1124,13 @@ class TestSerialEnrichment:
                 "cached": False,
             }
 
-        monkeypatch.setattr(parse, "SKU_CACHE_FILE", cache_file)
-        monkeypatch.setattr(parse, "_store_session", self.FakeSession)
-        monkeypatch.setattr(parse, "_fetch_sku", interrupt_second_lookup)
-        cache = parse._empty_cache()
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", interrupt_second_lookup)
+        cache = store_enrich._empty_cache()
 
         with pytest.raises(PSNTransactionsError, match="results were saved"):
-            parse._enrich_skus({"SKU001", "SKU002"}, cache)
+            store_enrich._enrich_skus({"SKU001", "SKU002"}, cache)
 
         saved = json.loads(cache_file.read_text())
         assert len(saved["entries"]) == 1

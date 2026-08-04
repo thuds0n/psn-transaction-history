@@ -603,7 +603,7 @@ def _fetch_with_http(
 
 
 def fetch_all(
-    output_path: str = "psn_transactions.json",
+    output_path: str = "psn_transactions_raw.json",
     limit: int | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
