@@ -1,0 +1,2 @@
+date,transaction_id,order_item_id,product,category,content_type,top_category,platform,publisher,release_date,enrichment_status,enrichment_detail,classification_source,classification_evidence,paid,paid_minor,original,original_minor,discount,discount_minor,tax,tax_minor,is_ps_plus,sku
+2026-01-02 10:30,EXAMPLE-TX-002,EXAMPLE-ORDER-PAID,Example Orbit,Full Game,FULL_GAME,downloadable_game,PS5,Example Studio,2026-01-01T00:00:00Z,success,,store_api,content_type=FULL_GAME,$14.99,1499,$19.99,1999,$5.00,500,$1.36,136,,EX0001-PPSA00001_00-ORBIT-E001

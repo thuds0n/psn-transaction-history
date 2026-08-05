@@ -17,7 +17,6 @@ CORE_CSV_FIELDS = [
     "date", "transaction_id", "order_item_id", "product",
     "paid", "paid_minor", "original", "original_minor", "discount",
     "discount_minor", "tax", "tax_minor", "sku",
-    "payment", "card_last4",
 ]
 
 ENRICHED_CSV_FIELDS = [
@@ -27,10 +26,191 @@ ENRICHED_CSV_FIELDS = [
     "classification_evidence",
     "paid", "paid_minor", "original", "original_minor", "discount",
     "discount_minor", "tax", "tax_minor", "is_ps_plus", "sku",
-    "payment", "card_last4",
 ]
 
+PAYMENT_DETAIL_FIELDS = ["payment", "card_last4"]
+
+_TRANSACTION_TEXT_FIELDS = (
+    "date",
+    "id",
+    "transactionType",
+    "invoiceType",
+    "displayOfTransactionValue",
+)
+_PURCHASE_TEXT_FIELDS = (
+    "displayOfOriginalPrice",
+    "displayOfDiscount",
+    "displayOfTax",
+)
+_PRODUCT_TEXT_FIELDS = (
+    "orderItemId",
+    "skuId",
+    "productName",
+    "skuType",
+    "totalFormatted",
+    "displayOfPrice",
+    "originalPriceFormatted",
+    "discountFormatted",
+    "taxFormatted",
+)
+_PRODUCT_NUMBER_FIELDS = ("total", "originalPrice", "discount", "tax")
+
 console = Console()
+
+
+def _value_type(value: object) -> str:
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def _raise_schema_error(
+    input_path: Path,
+    field_path: str,
+    expected: str,
+    value: object,
+) -> None:
+    raise PSNTransactionsError(
+        f"Transaction JSON at {input_path} has invalid {field_path}: "
+        f"expected {expected}, found {_value_type(value)}."
+    )
+
+
+def _validate_optional_text_fields(
+    value: dict,
+    fields: tuple[str, ...],
+    *,
+    input_path: Path,
+    field_path: str,
+) -> None:
+    for field in fields:
+        field_value = value.get(field)
+        if field_value is not None and not isinstance(field_value, str):
+            _raise_schema_error(
+                input_path,
+                f"{field_path}.{field}",
+                "a string or null",
+                field_value,
+            )
+
+
+def _validate_transactions_schema(
+    transactions: list[dict],
+    input_path: Path,
+) -> None:
+    """Validate structures used by CSV export without requiring optional data."""
+    for transaction_index, transaction in enumerate(transactions):
+        transaction_path = f"transaction[{transaction_index}]"
+        _validate_optional_text_fields(
+            transaction,
+            _TRANSACTION_TEXT_FIELDS,
+            input_path=input_path,
+            field_path=transaction_path,
+        )
+
+        date_value = transaction.get("date")
+        if date_value:
+            try:
+                datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+            except ValueError:
+                raise PSNTransactionsError(
+                    f"Transaction JSON at {input_path} has invalid "
+                    f"{transaction_path}.date: expected an ISO 8601 timestamp."
+                ) from None
+
+        charge_details = transaction.get("chargeDetails")
+        if charge_details is not None:
+            if not isinstance(charge_details, list):
+                _raise_schema_error(
+                    input_path,
+                    f"{transaction_path}.chargeDetails",
+                    "a list or null",
+                    charge_details,
+                )
+            for charge_index, charge in enumerate(charge_details):
+                charge_path = f"{transaction_path}.chargeDetails[{charge_index}]"
+                if not isinstance(charge, dict):
+                    _raise_schema_error(
+                        input_path,
+                        charge_path,
+                        "an object",
+                        charge,
+                    )
+                _validate_optional_text_fields(
+                    charge,
+                    ("paymentMethod", "paymentDescriptionDisplay"),
+                    input_path=input_path,
+                    field_path=charge_path,
+                )
+
+        purchase_details = transaction.get("purchaseDetails")
+        if purchase_details is None:
+            continue
+        if not isinstance(purchase_details, dict):
+            _raise_schema_error(
+                input_path,
+                f"{transaction_path}.purchaseDetails",
+                "an object or null",
+                purchase_details,
+            )
+        _validate_optional_text_fields(
+            purchase_details,
+            _PURCHASE_TEXT_FIELDS,
+            input_path=input_path,
+            field_path=f"{transaction_path}.purchaseDetails",
+        )
+
+        products = purchase_details.get("productPurchases")
+        if products is None:
+            continue
+        if not isinstance(products, list):
+            _raise_schema_error(
+                input_path,
+                f"{transaction_path}.purchaseDetails.productPurchases",
+                "a list or null",
+                products,
+            )
+        for product_index, product in enumerate(products):
+            product_path = (
+                f"{transaction_path}.purchaseDetails."
+                f"productPurchases[{product_index}]"
+            )
+            if not isinstance(product, dict):
+                _raise_schema_error(input_path, product_path, "an object", product)
+            _validate_optional_text_fields(
+                product,
+                _PRODUCT_TEXT_FIELDS,
+                input_path=input_path,
+                field_path=product_path,
+            )
+            for field in _PRODUCT_NUMBER_FIELDS:
+                field_value = product.get(field)
+                if field_value is not None and (
+                    isinstance(field_value, bool)
+                    or not isinstance(field_value, (int, float))
+                ):
+                    _raise_schema_error(
+                        input_path,
+                        f"{product_path}.{field}",
+                        "a number or null",
+                        field_value,
+                    )
+
+
+def _product_missing_detail(product: dict) -> str:
+    missing_fields = [
+        field
+        for field in ("orderItemId", "productName", "total")
+        if product.get(field) is None or product.get(field) == ""
+    ]
+    if not missing_fields:
+        return ""
+    label = "field" if len(missing_fields) == 1 else "fields"
+    return f"Transaction item missing optional {label}: {', '.join(missing_fields)}"
+
+
+def _combine_details(*details: str) -> str:
+    return "; ".join(detail for detail in details if detail)
 
 
 def _result_from_cache(sku: str, cache: dict) -> dict | None:
@@ -49,6 +229,7 @@ def flatten_transactions(
     cache: dict,
     enriched: bool,
     enrichment_results: dict[str, dict] | None = None,
+    include_payment_details: bool = False,
 ) -> list[dict]:
     rows = []
     for transaction in txs:
@@ -65,7 +246,8 @@ def flatten_transactions(
             "invoiceType", ""
         )
 
-        charge = (transaction.get("chargeDetails") or [{}])[0]
+        charge_details = transaction.get("chargeDetails") or []
+        charge = charge_details[0] if charge_details else {}
         payment = charge.get("paymentMethod", "")
         card_last4 = (
             charge.get("paymentDescriptionDisplay", "").replace("*", "").strip()
@@ -129,6 +311,10 @@ def flatten_transactions(
                     "detail": "Transaction item has no SKU" if not sku else "",
                 }
             info = result.get("metadata") or {}
+            enrichment_detail = _combine_details(
+                result.get("detail", ""),
+                _product_missing_detail(product) if enriched else "",
+            )
 
             if enriched:
                 (
@@ -162,7 +348,7 @@ def flatten_transactions(
                     "publisher": info.get("publisher", ""),
                     "release_date": info.get("release_date", ""),
                     "enrichment_status": result.get("status", "") if enriched else "",
-                    "enrichment_detail": result.get("detail", "") if enriched else "",
+                    "enrichment_detail": enrichment_detail if enriched else "",
                     "classification_source": classification_source,
                     "classification_evidence": classification_evidence,
                     "paid": product.get("totalFormatted")
@@ -182,7 +368,9 @@ def flatten_transactions(
             )
 
     rows.sort(key=lambda row: row["date"], reverse=True)
-    fields = ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS
+    fields = list(ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS)
+    if include_payment_details:
+        fields.extend(PAYMENT_DETAIL_FIELDS)
     return [{field: row[field] for field in fields} for row in rows]
 
 
@@ -246,7 +434,9 @@ def _print_enrichment_summary(
         lookup_statuses[key] = result.get("status", "unknown")
         if result.get("cached"):
             cache_hit_keys.add(key)
-        elif result.get("status") != "cache_miss":
+        if result.get("network_requested") or (
+            not result.get("cached") and result.get("status") != "cache_miss"
+        ):
             network_keys.add(key)
 
     status_counts = Counter(lookup_statuses.values())
@@ -301,6 +491,7 @@ def load_transactions(json_path: str) -> list[dict]:
         raise PSNTransactionsError(
             f"Transaction JSON at {input_path} contains a non-object transaction."
         )
+    _validate_transactions_schema(payload, input_path)
     return payload
 
 
@@ -313,6 +504,7 @@ def _write_csv(
     refresh: bool = False,
     cache_only: bool = False,
     summary: bool = False,
+    include_payment_details: bool = False,
 ) -> None:
     if refresh and cache_only:
         raise PSNTransactionsError("--refresh and --cache-only cannot be used together.")
@@ -406,13 +598,16 @@ def _write_csv(
             cache,
             enriched,
             enrichment_results=enrichment_results,
+            include_payment_details=include_payment_details,
         )
     except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
         raise PSNTransactionsError(
             f"Transaction JSON at {json_path} has an unexpected transaction structure."
         ) from exc
 
-    fields = ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS
+    fields = list(ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS)
+    if include_payment_details:
+        fields.extend(PAYMENT_DETAIL_FIELDS)
     atomic_write_csv(Path(csv_path), rows, fields)
     console.print(f"✓ Saved [bold]{len(rows)}[/bold] rows to {csv_path}")
 
@@ -429,9 +624,16 @@ def _write_csv(
 def export_csv(
     json_path: str = "psn_transactions_raw.json",
     csv_path: str = "psn_transactions.csv",
+    *,
+    include_payment_details: bool = False,
 ) -> None:
     """Export raw transaction JSON to the core CSV schema."""
-    _write_csv(json_path=json_path, csv_path=csv_path, enriched=False)
+    _write_csv(
+        json_path=json_path,
+        csv_path=csv_path,
+        enriched=False,
+        include_payment_details=include_payment_details,
+    )
 
 
 def enrich_csv(
@@ -442,6 +644,7 @@ def enrich_csv(
     refresh: bool = False,
     cache_only: bool = False,
     summary: bool = False,
+    include_payment_details: bool = False,
 ) -> None:
     """Export transactions with Store metadata and classification."""
     _write_csv(
@@ -452,6 +655,7 @@ def enrich_csv(
         refresh=refresh,
         cache_only=cache_only,
         summary=summary,
+        include_payment_details=include_payment_details,
     )
 
 
@@ -461,12 +665,14 @@ def _flatten(
     cache: dict,
     enrich: bool,
     enrichment_results: dict[str, dict] | None = None,
+    include_payment_details: bool = False,
 ) -> list[dict]:
     return flatten_transactions(
         txs,
         cache,
         enriched=enrich,
         enrichment_results=enrichment_results,
+        include_payment_details=include_payment_details,
     )
 
 
