@@ -42,3 +42,10 @@ exports/
 # PSN data — never commit raw history or credentials
 *.json
 *.csv
+
+# Explicitly synthetic, anonymised regression fixtures
+!tests/fixtures/anonymised_transactions_raw.json
+!tests/fixtures/anonymised_sku_cache.json
+!tests/fixtures/anonymised_basic.csv
+!tests/fixtures/anonymised_cache_only_enriched.csv
+!tests/fixtures/anonymised_paid_only_enriched.csv

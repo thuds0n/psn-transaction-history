@@ -101,11 +101,15 @@ on the timezone configured on the machine running the command.
 ```bash
 psn-transactions export
 psn-transactions export --output my_transactions.csv
+psn-transactions export --include-payment-details
 ```
 
 This reads `psn_transactions_raw.json` and writes `psn_transactions.csv`
 without making Store requests. The completed CSV replaces any existing file
-atomically.
+atomically. Payment method and card-last-four data are excluded by default;
+add `--include-payment-details` only when those sensitive fields are needed.
+The raw JSON snapshot is unchanged and continues to contain the response
+returned by PSN.
 
 ### 4. Enrich and export to CSV
 
@@ -114,6 +118,7 @@ psn-transactions enrich
 psn-transactions enrich --paid-only
 psn-transactions enrich --paid-only --summary
 psn-transactions enrich --output my_transactions_enriched.csv
+psn-transactions enrich --include-payment-details
 ```
 
 This reads `psn_transactions_raw.json`, looks up current PS Store metadata,
@@ -137,11 +142,24 @@ psn-transactions enrich --cache-only
 `--cache-only` makes no Store requests and marks uncached products as
 `cache_miss`. The two options cannot be used together.
 
+During `--refresh`, a temporary Store failure does not discard useful cached
+metadata. The row uses that metadata with an enrichment status of
+`stale_cache` and a detail describing the refresh failure. Confirmed permanent
+results such as HTTP 404 replace the previous cache entry.
+
 Normal runs show progress, important failures and the saved output path without
 printing purchase names or identifiers. Add `--summary` for detailed aggregate
 counts covering transactions, product rows, output rows, unique SKUs,
 normalised lookup keys, cache hits, network requests, lookup statuses and
 classification sources. No separate summary file is created.
+
+Export validates the PSN structures it consumes, including product lists,
+line-item identifiers, SKUs, product names and numeric item totals. Structural
+schema drift stops the export with an anonymous field path rather than silently
+creating blank columns. Optional missing item data remains exportable and is
+described in `enrichment_detail` where applicable. Store responses receive the
+same structural checks; malformed responses are reported as temporary lookup
+failures without including response bodies.
 
 ## CSV columns
 
@@ -156,12 +174,18 @@ classification sources. No separate summary file is created.
 | `discount` | Discount applied |
 | `tax` | Tax component |
 | `sku` | PlayStation SKU identifier |
-| `payment` | Payment method |
-| `card_last4` | Last 4 digits of payment card |
 
 Product rows also include integer minor-unit values in `paid_minor`,
 `original_minor`, `discount_minor`, and `tax_minor`. These avoid parsing
 locale-formatted currency strings in downstream tools.
+
+When `--include-payment-details` is explicitly supplied, two additional
+columns are appended:
+
+| Column | Description |
+|---|---|
+| `payment` | Payment method |
+| `card_last4` | Last four digits of the payment card |
 
 ### Enriched columns
 
@@ -217,6 +241,7 @@ metadata and have an enrichment status of `not_applicable`.
 | `not_found` | The Store returned HTTP 404 |
 | `no_metadata` | The Store response was valid but lacked useful metadata |
 | `temporary_failure` | A network, rate-limit, server, or response error can be retried later |
+| `stale_cache` | A refresh failed temporarily, so existing useful cached metadata was retained |
 | `cache_miss` | Cache-only mode had no reusable metadata for the SKU |
 | `missing_sku` | The transaction item has no SKU to look up |
 | `not_applicable` | The transaction has no product item to enrich |
@@ -226,8 +251,10 @@ SKU lookups are cached atomically in the owner-only file
 and source schema. A 404 is retried after seven days and a valid response with
 no useful metadata is retried after one day. Transient network, rate-limit, and
 Store server failures are not cached, so the next `enrich` run can retry them.
-Successful results are reused until `--refresh` is requested. Changing locale
-does not reuse metadata from another regional Store.
+Successful results are reused until `--refresh` is requested. If refresh fails
+temporarily, the successful cache record is preserved; a confirmed 404 or valid
+no-metadata response replaces it. Changing locale does not reuse metadata from
+another regional Store.
 
 ## Development
 
@@ -238,6 +265,10 @@ The processing code is separated by responsibility:
 - `export.py` contains CSV schemas, transaction flattening and the explicit
   `export_csv()` and `enrich_csv()` entry points.
 - `parse.py` is a small compatibility façade for older internal imports.
+
+Anonymised end-to-end fixtures cover basic export, cache-only enrichment and
+paid-only enriched export. They contain synthetic names, identifiers, amounts
+and payment details only.
 
 With the virtual environment activated, install the development extras and run the suite:
 

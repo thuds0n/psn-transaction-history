@@ -1,0 +1,75 @@
+[
+  {
+    "id": "EXAMPLE-TX-003",
+    "date": "2026-01-03T08:45:00.000Z",
+    "transactionType": "PRODUCT_PURCHASE",
+    "displayOfTransactionValue": "$0.00",
+    "chargeDetails": [],
+    "purchaseDetails": {
+      "displayOfOriginalPrice": "",
+      "displayOfDiscount": "$0.00",
+      "displayOfTax": "$0.00",
+      "productPurchases": [
+        {
+          "skuId": "EX0001-PPSA00003_00-SERVICE-E001",
+          "skuType": "SUBSCRIPTION"
+        }
+      ]
+    }
+  },
+  {
+    "id": "EXAMPLE-TX-002",
+    "date": "2026-01-02T10:30:00.000Z",
+    "transactionType": "PRODUCT_PURCHASE",
+    "displayOfTransactionValue": "$14.99",
+    "chargeDetails": [
+      {
+        "paymentMethod": "EXAMPLE_PAYMENT",
+        "paymentDescriptionDisplay": "****0000"
+      }
+    ],
+    "purchaseDetails": {
+      "displayOfOriginalPrice": "$24.98",
+      "displayOfDiscount": "$9.99",
+      "displayOfTax": "$1.36",
+      "productPurchases": [
+        {
+          "orderItemId": "EXAMPLE-ORDER-PAID",
+          "productName": "Example Orbit",
+          "skuId": "EX0001-PPSA00001_00-ORBIT-E001",
+          "skuType": "STANDARD",
+          "totalFormatted": "$14.99",
+          "originalPriceFormatted": "$19.99",
+          "discountFormatted": "$5.00",
+          "taxFormatted": "$1.36",
+          "total": 1499,
+          "originalPrice": 1999,
+          "discount": 500,
+          "tax": 136
+        },
+        {
+          "orderItemId": "EXAMPLE-ORDER-FREE",
+          "productName": "Example Bonus Add-on",
+          "skuId": "EX0001-PPSA00002_00-BONUS-E001",
+          "skuType": "STANDARD",
+          "totalFormatted": "$0.00",
+          "originalPriceFormatted": "$4.99",
+          "discountFormatted": "$4.99",
+          "taxFormatted": "$0.00",
+          "total": 0,
+          "originalPrice": 499,
+          "discount": 499,
+          "tax": 0
+        }
+      ]
+    }
+  },
+  {
+    "id": "EXAMPLE-TX-001",
+    "date": "2026-01-01T09:15:00.000Z",
+    "transactionType": "DEPOSIT_CHARGE",
+    "displayOfTransactionValue": "$25.00",
+    "chargeDetails": [],
+    "purchaseDetails": null
+  }
+]

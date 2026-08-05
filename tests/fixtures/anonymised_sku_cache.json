@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "source": "playstation-store-chihiro",
+  "entries": {
+    "en-us|EX0001-PPSA00001_00-ORBIT": {
+      "status": "success",
+      "fetched_at": "2026-01-04T00:00:00Z",
+      "metadata": {
+        "content_type": "FULL_GAME",
+        "top_category": "downloadable_game",
+        "platform": "PS5",
+        "publisher": "Example Studio",
+        "release_date": "2026-01-01T00:00:00Z"
+      }
+    },
+    "en-us|EX0001-PPSA00002_00-BONUS": {
+      "status": "success",
+      "fetched_at": "2026-01-04T00:00:00Z",
+      "metadata": {
+        "content_type": "ADD_ON",
+        "top_category": "add_on",
+        "platform": "PS5",
+        "publisher": "Example Studio",
+        "release_date": "2026-01-02T00:00:00Z"
+      }
+    }
+  }
+}

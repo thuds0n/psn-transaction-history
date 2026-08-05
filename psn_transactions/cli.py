@@ -92,11 +92,20 @@ def fetch(
         raise typer.Exit(code=1)
 
 
-def _export_csv(input_path: str, output_path: str) -> None:
+def _export_csv(
+    input_path: str,
+    output_path: str,
+    *,
+    include_payment_details: bool,
+) -> None:
     from psn_transactions.export import export_csv
 
     try:
-        export_csv(json_path=input_path, csv_path=output_path)
+        export_csv(
+            json_path=input_path,
+            csv_path=output_path,
+            include_payment_details=include_payment_details,
+        )
     except PSNTransactionsError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -110,6 +119,7 @@ def _enrich_csv(
     refresh: bool,
     cache_only: bool,
     summary: bool,
+    include_payment_details: bool,
 ) -> None:
     from psn_transactions.export import enrich_csv
 
@@ -121,6 +131,7 @@ def _enrich_csv(
             refresh=refresh,
             cache_only=cache_only,
             summary=summary,
+            include_payment_details=include_payment_details,
         )
     except PSNTransactionsError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
@@ -140,9 +151,18 @@ def export(
         "--csv",
         help="Path for the output CSV.",
     ),
+    include_payment_details: bool = typer.Option(
+        False,
+        "--include-payment-details",
+        help="Include payment method and card-last-four columns in the CSV.",
+    ),
 ) -> None:
     """Export raw transaction JSON to CSV without Store lookups."""
-    _export_csv(input, output)
+    _export_csv(
+        input,
+        output,
+        include_payment_details=include_payment_details,
+    )
 
 
 @app.command()
@@ -178,6 +198,11 @@ def enrich(
         "--summary",
         help="Print detailed privacy-safe processing and classification counts.",
     ),
+    include_payment_details: bool = typer.Option(
+        False,
+        "--include-payment-details",
+        help="Include payment method and card-last-four columns in the CSV.",
+    ),
 ) -> None:
     """Export to CSV with current PS Store metadata and classification."""
     if refresh and cache_only:
@@ -194,6 +219,7 @@ def enrich(
         refresh=refresh,
         cache_only=cache_only,
         summary=summary,
+        include_payment_details=include_payment_details,
     )
 
 

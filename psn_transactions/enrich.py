@@ -43,6 +43,7 @@ class EnrichmentResult(TypedDict):
     metadata: dict
     cached: bool
     detail: NotRequired[str]
+    network_requested: NotRequired[bool]
 
 
 def _chihiro_url(sku_base: str) -> str:
@@ -245,10 +246,68 @@ def _normalise_text_list(value: Any) -> str:
     return ""
 
 
+def _store_response_error(data: dict) -> str | None:
+    """Return a privacy-safe structural error for fields consumed by enrichment."""
+    attributes = data.get("attributes")
+    if attributes is not None and not isinstance(attributes, dict):
+        return f"attributes must be an object or null, found {type(attributes).__name__}"
+    attrs = attributes if isinstance(attributes, dict) else data
+
+    for field in ("game_content_type", "gameContentType"):
+        value = attrs.get(field)
+        if value is not None and not isinstance(value, str):
+            return f"{field} must be a string or null, found {type(value).__name__}"
+
+    content_type = attrs.get("content_type")
+    if content_type is not None and (
+        isinstance(content_type, bool)
+        or not isinstance(content_type, (str, int))
+    ):
+        return (
+            "content_type must be a string, integer or null, "
+            f"found {type(content_type).__name__}"
+        )
+
+    content_types = attrs.get("gameContentTypesList")
+    if content_types is not None:
+        if not isinstance(content_types, list):
+            return (
+                "gameContentTypesList must be a list or null, "
+                f"found {type(content_types).__name__}"
+            )
+        for index, item in enumerate(content_types):
+            if isinstance(item, str):
+                continue
+            if not isinstance(item, dict):
+                return (
+                    f"gameContentTypesList[{index}] must be an object or string, "
+                    f"found {type(item).__name__}"
+                )
+            for field in ("key", "name"):
+                value = item.get(field)
+                if value is not None and not isinstance(value, str):
+                    return (
+                        f"gameContentTypesList[{index}].{field} must be a string "
+                        f"or null, found {type(value).__name__}"
+                    )
+
+    for field in ("top_category", "playable_platform", "provider_name", "release_date"):
+        value = attrs.get(field)
+        if value is None or isinstance(value, str):
+            continue
+        if not isinstance(value, list):
+            return (
+                f"{field} must be a string, list or null, "
+                f"found {type(value).__name__}"
+            )
+        if any(not isinstance(item, str) for item in value):
+            return f"{field} list entries must all be strings"
+    return None
+
+
 def _normalise_store_metadata(data: dict) -> dict:
-    attrs = data.get("attributes", {}) or data
-    if not isinstance(attrs, dict):
-        return {}
+    attributes = data.get("attributes")
+    attrs = attributes if isinstance(attributes, dict) else data
     return {
         "content_type": _normalise_content_type(attrs),
         "top_category": _normalise_text_list(attrs.get("top_category")),
@@ -357,6 +416,15 @@ def _fetch_sku(
                 "detail": "unexpected response shape",
             }
 
+        response_error = _store_response_error(data)
+        if response_error:
+            return {
+                "status": "temporary_failure",
+                "metadata": {},
+                "cached": False,
+                "detail": f"Malformed Store response: {response_error}",
+            }
+
         metadata = _normalise_store_metadata(data)
         status = "success" if _metadata_is_useful(metadata) else "no_metadata"
         result = {"status": status, "metadata": metadata, "cached": False}
@@ -402,7 +470,7 @@ def _enrich_skus(
     cache_mode: CacheMode = CacheMode.USE,
 ) -> dict[str, EnrichmentResult]:
     results: dict[str, EnrichmentResult] = {}
-    pending: list[tuple[str, list[str]]] = []
+    pending: list[tuple[str, list[str], EnrichmentResult | None]] = []
     grouped_skus = _group_skus(skus)
 
     with Progress(
@@ -431,7 +499,7 @@ def _enrich_skus(
                     results[sku] = result
                 progress.advance(task, len(variants))
             else:
-                pending.append((representative, variants))
+                pending.append((representative, variants, cached))
 
         completed_requests = 0
 
@@ -439,8 +507,27 @@ def _enrich_skus(
             representative: str,
             variants: list[str],
             result: EnrichmentResult,
+            stale_candidate: EnrichmentResult | None,
         ) -> None:
             nonlocal completed_requests
+            result = {**result, "network_requested": True}
+            if (
+                cache_mode is CacheMode.REFRESH
+                and result.get("status") == "temporary_failure"
+                and stale_candidate is not None
+                and stale_candidate.get("status") == "success"
+                and _metadata_is_useful(stale_candidate.get("metadata") or {})
+            ):
+                failure_detail = result.get("detail") or "a temporary Store error"
+                result = {
+                    "status": "stale_cache",
+                    "metadata": stale_candidate["metadata"],
+                    "cached": True,
+                    "network_requested": True,
+                    "detail": (
+                        f"Refresh failed with {failure_detail}; using cached metadata"
+                    ),
+                }
             _record_lookup_result(representative, cache, result)
             for sku in variants:
                 results[sku] = result
@@ -452,11 +539,12 @@ def _enrich_skus(
         if pending:
             try:
                 with _store_session() as session:
-                    for representative, variants in pending:
+                    for representative, variants, stale_candidate in pending:
                         record_completed(
                             representative,
                             variants,
                             _fetch_sku(representative, session=session),
+                            stale_candidate,
                         )
             except KeyboardInterrupt as exc:
                 _save_cache(cache)

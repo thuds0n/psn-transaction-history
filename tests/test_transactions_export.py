@@ -2,8 +2,10 @@
 
 import csv
 import json
+import shutil
 import stat
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 import requests
@@ -25,8 +27,12 @@ from psn_transactions.enrich import (
 from psn_transactions.export import (
     CORE_CSV_FIELDS,
     ENRICHED_CSV_FIELDS,
+    PAYMENT_DETAIL_FIELDS,
     _flatten,
 )
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +81,7 @@ def make_product(
     paid = f"${paid_cents / 100:.2f}"
     orig = f"${original_cents / 100:.2f}"
     return {
+        "orderItemId": "ORDERITEM001",
         "productName": name,
         "skuId": sku,
         "skuType": sku_type,
@@ -283,7 +290,7 @@ class TestStoreMetadataNormalisation:
 # ---------------------------------------------------------------------------
 
 class TestFlatten:
-    def test_single_product_maps_to_one_row(self):
+    def test_single_product_maps_to_one_row_without_payment_details_by_default(self):
         product = make_product("Buzz Lightyear", "EP0001-PPSA12345_00-BUZZ-E001", paid_cents=537, original_cents=537)
         tx = make_tx(tx_total=537, tx_original=537, products=[product],
                      charge_method="CREDIT_CARD", charge_display="****1234")
@@ -291,8 +298,32 @@ class TestFlatten:
         assert len(rows) == 1
         assert rows[0]["product"] == "Buzz Lightyear"
         assert rows[0]["paid"] == "$5.37"
+        assert "payment" not in rows[0]
+        assert "card_last4" not in rows[0]
+
+    def test_payment_details_can_be_included_explicitly(self):
+        product = make_product(
+            "Buzz Lightyear",
+            "EP0001-PPSA12345_00-BUZZ-E001",
+            paid_cents=537,
+            original_cents=537,
+        )
+        tx = make_tx(
+            products=[product],
+            charge_method="CREDIT_CARD",
+            charge_display="****1234",
+        )
+
+        rows = _flatten(
+            [tx],
+            cache={},
+            enrich=False,
+            include_payment_details=True,
+        )
+
         assert rows[0]["payment"] == "CREDIT_CARD"
         assert rows[0]["card_last4"] == "1234"
+        assert list(rows[0]) == CORE_CSV_FIELDS + PAYMENT_DETAIL_FIELDS
 
     def test_multiple_products_per_transaction_expand_to_rows(self):
         products = [
@@ -465,6 +496,78 @@ class TestExportIntegrity:
         assert rows[0]["product"] == "Some Game"
         assert list(rows[0]) == CORE_CSV_FIELDS
 
+    def test_anonymised_raw_fixture_to_basic_export(self, tmp_path):
+        output_path = tmp_path / "transactions.csv"
+
+        csv_export.export_csv(
+            json_path=str(FIXTURES / "anonymised_transactions_raw.json"),
+            csv_path=str(output_path),
+        )
+
+        assert output_path.read_text().splitlines() == (
+            FIXTURES / "anonymised_basic.csv"
+        ).read_text().splitlines()
+
+    def test_export_includes_payment_columns_only_when_requested(self, tmp_path):
+        input_path = tmp_path / "transactions.json"
+        output_path = tmp_path / "transactions.csv"
+        input_path.write_text(
+            json.dumps(
+                [
+                    make_tx(
+                        products=[make_product("Example Product", "EXAMPLE-SKU")],
+                        charge_method="EXAMPLE_PAYMENT",
+                        charge_display="****0000",
+                    )
+                ]
+            )
+        )
+
+        csv_export.export_csv(
+            json_path=str(input_path),
+            csv_path=str(output_path),
+            include_payment_details=True,
+        )
+
+        with output_path.open(newline="", encoding="utf-8") as output_file:
+            row = next(csv.DictReader(output_file))
+        assert list(row) == CORE_CSV_FIELDS + PAYMENT_DETAIL_FIELDS
+        assert row["payment"] == "EXAMPLE_PAYMENT"
+        assert row["card_last4"] == "0000"
+
+    @pytest.mark.parametrize(
+        ("paid_only", "expected_name"),
+        [
+            (False, "anonymised_cache_only_enriched.csv"),
+            (True, "anonymised_paid_only_enriched.csv"),
+        ],
+    )
+    def test_anonymised_raw_fixture_to_cache_only_enriched_export(
+        self, tmp_path, monkeypatch, paid_only, expected_name
+    ):
+        output_path = tmp_path / "transactions.csv"
+        cache_file = tmp_path / ".psn-transactions" / "sku_cache.json"
+        cache_file.parent.mkdir()
+        shutil.copyfile(FIXTURES / "anonymised_sku_cache.json", cache_file)
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-us")
+        monkeypatch.setattr(
+            store_enrich,
+            "_store_session",
+            lambda: (_ for _ in ()).throw(AssertionError("network session opened")),
+        )
+
+        csv_export.enrich_csv(
+            json_path=str(FIXTURES / "anonymised_transactions_raw.json"),
+            csv_path=str(output_path),
+            cache_only=True,
+            paid_only=paid_only,
+        )
+
+        assert output_path.read_text().splitlines() == (
+            FIXTURES / expected_name
+        ).read_text().splitlines()
+
     @pytest.mark.parametrize(
         ("contents", "message"),
         [
@@ -484,6 +587,92 @@ class TestExportIntegrity:
                 json_path=str(input_path),
                 csv_path=str(tmp_path / "transactions.csv"),
             )
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            (
+                lambda transaction: transaction.update(purchaseDetails=[]),
+                r"transaction\[0\]\.purchaseDetails",
+            ),
+            (
+                lambda transaction: transaction["purchaseDetails"].update(
+                    productPurchases={}
+                ),
+                r"transaction\[0\]\.purchaseDetails\.productPurchases",
+            ),
+            (
+                lambda transaction: transaction["purchaseDetails"].update(
+                    productPurchases=["not-an-object"]
+                ),
+                r"productPurchases\[0\].*expected an object",
+            ),
+            (
+                lambda transaction: transaction["purchaseDetails"][
+                    "productPurchases"
+                ][0].update(orderItemId=123),
+                r"productPurchases\[0\]\.orderItemId",
+            ),
+            (
+                lambda transaction: transaction["purchaseDetails"][
+                    "productPurchases"
+                ][0].update(skuId=[]),
+                r"productPurchases\[0\]\.skuId",
+            ),
+            (
+                lambda transaction: transaction["purchaseDetails"][
+                    "productPurchases"
+                ][0].update(productName={}),
+                r"productPurchases\[0\]\.productName",
+            ),
+            (
+                lambda transaction: transaction["purchaseDetails"][
+                    "productPurchases"
+                ][0].update(total="$9.99"),
+                r"productPurchases\[0\]\.total.*expected a number",
+            ),
+        ],
+    )
+    def test_export_reports_precise_schema_drift(
+        self, tmp_path, mutate, message
+    ):
+        transaction = make_tx(
+            products=[make_product("Example Product", "EXAMPLE-SKU-E001")]
+        )
+        mutate(transaction)
+        input_path = tmp_path / "transactions.json"
+        input_path.write_text(json.dumps([transaction]))
+
+        with pytest.raises(PSNTransactionsError, match=message):
+            csv_export.export_csv(
+                json_path=str(input_path),
+                csv_path=str(tmp_path / "transactions.csv"),
+            )
+
+    def test_missing_optional_product_data_is_reported_in_enrichment_detail(self):
+        product = make_product("Example Product", "EXAMPLE-SKU-E001")
+        product.pop("orderItemId")
+        product.pop("productName")
+        product.pop("total")
+
+        rows = _flatten(
+            [make_tx(products=[product])],
+            cache={},
+            enrich=True,
+            enrichment_results={
+                "EXAMPLE-SKU-E001": {
+                    "status": "success",
+                    "metadata": {"content_type": "FULL_GAME"},
+                    "cached": True,
+                }
+            },
+        )
+
+        assert rows[0]["enrichment_status"] == "success"
+        assert rows[0]["enrichment_detail"] == (
+            "Transaction item missing optional fields: "
+            "orderItemId, productName, total"
+        )
 
     def test_export_failure_preserves_existing_csv(self, tmp_path, monkeypatch):
         input_path = tmp_path / "transactions.json"
@@ -687,6 +876,7 @@ class TestExportIntegrity:
             {
                 "json_path": "psn_transactions_raw.json",
                 "csv_path": "psn_transactions.csv",
+                "include_payment_details": False,
             }
         ]
 
@@ -709,6 +899,7 @@ class TestExportIntegrity:
                 "refresh": False,
                 "cache_only": False,
                 "summary": False,
+                "include_payment_details": False,
             }
         ]
 
@@ -722,7 +913,13 @@ class TestExportIntegrity:
 
         result = CliRunner().invoke(
             app,
-            ["enrich", "--paid-only", "--refresh", "--summary"],
+            [
+                "enrich",
+                "--paid-only",
+                "--refresh",
+                "--summary",
+                "--include-payment-details",
+            ],
         )
 
         assert result.exit_code == 0
@@ -734,8 +931,25 @@ class TestExportIntegrity:
                 "refresh": True,
                 "cache_only": False,
                 "summary": True,
+                "include_payment_details": True,
             }
         ]
+
+    def test_export_cli_forwards_payment_details_option(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            csv_export,
+            "export_csv",
+            lambda **kwargs: calls.append(kwargs),
+        )
+
+        result = CliRunner().invoke(
+            app,
+            ["export", "--include-payment-details"],
+        )
+
+        assert result.exit_code == 0
+        assert calls[0]["include_payment_details"] is True
 
     def test_enrich_rejects_refresh_with_cache_only(self, monkeypatch):
         calls = []
@@ -945,6 +1159,29 @@ class TestSkuCacheIntegrity:
         assert result["status"] == "no_metadata"
         assert cache["entries"]["en-us|SKU001"]["status"] == "no_metadata"
 
+    def test_malformed_store_structure_is_a_precise_temporary_failure(
+        self, monkeypatch
+    ):
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"attributes": ["not-an-object"]}
+
+        monkeypatch.setattr(
+            store_enrich.requests,
+            "get",
+            lambda *args, **kwargs: FakeResponse(),
+        )
+
+        result = store_enrich._fetch_sku("SKU001")
+
+        assert result["status"] == "temporary_failure"
+        assert result["detail"] == (
+            "Malformed Store response: attributes must be an object or null, "
+            "found list"
+        )
+
     def test_no_content_response_is_cached_as_no_metadata(self, monkeypatch):
         class FakeResponse:
             status_code = 204
@@ -1081,6 +1318,73 @@ class TestSerialEnrichment:
             cache["entries"][store_enrich._cache_key("SKU001")]["metadata"]["content_type"]
             == "FULL_GAME"
         )
+
+    def test_refresh_temporary_failure_uses_stale_successful_metadata(
+        self, monkeypatch
+    ):
+        def fake_fetch(sku, session=None):
+            return {
+                "status": "temporary_failure",
+                "metadata": {},
+                "cached": False,
+                "detail": "HTTP 503",
+            }
+
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001",
+            cache,
+            "success",
+            {"content_type": "ADD_ON"},
+        )
+        cached_record = dict(cache["entries"][store_enrich._cache_key("SKU001")])
+
+        results = store_enrich._enrich_skus(
+            {"SKU001"},
+            cache,
+            cache_mode=store_enrich.CacheMode.REFRESH,
+        )
+
+        assert results["SKU001"] == {
+            "status": "stale_cache",
+            "metadata": {"content_type": "ADD_ON"},
+            "cached": True,
+            "network_requested": True,
+            "detail": "Refresh failed with HTTP 503; using cached metadata",
+        }
+        assert cache["entries"][store_enrich._cache_key("SKU001")] == cached_record
+
+    def test_refresh_not_found_replaces_previous_success(self, monkeypatch):
+        def fake_fetch(sku, session=None):
+            return {
+                "status": "not_found",
+                "metadata": {},
+                "cached": False,
+                "detail": "HTTP 404",
+            }
+
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001",
+            cache,
+            "success",
+            {"content_type": "FULL_GAME"},
+        )
+
+        results = store_enrich._enrich_skus(
+            {"SKU001"},
+            cache,
+            cache_mode=store_enrich.CacheMode.REFRESH,
+        )
+
+        assert results["SKU001"]["status"] == "not_found"
+        record = cache["entries"][store_enrich._cache_key("SKU001")]
+        assert record["status"] == "not_found"
+        assert record["metadata"] == {}
 
     def test_cache_only_uses_hits_and_marks_misses_without_session(self, monkeypatch):
         cache = store_enrich._empty_cache()
