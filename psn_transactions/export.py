@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from psn_transactions import classify, config as cfg, relationships
+from psn_transactions import classify, config as cfg, overrides as manual, relationships
 from psn_transactions import enrich as store
 from psn_transactions.errors import PSNTransactionsError
 from psn_transactions.storage import atomic_write_csv
@@ -235,8 +235,10 @@ def flatten_transactions(
     enriched: bool,
     enrichment_results: dict[str, dict] | None = None,
     include_payment_details: bool = False,
+    overrides: dict[str, dict[str, str]] | None = None,
 ) -> list[dict]:
     rows = []
+    locale = cfg.get_locale() if enriched else ""
     for transaction in txs:
         date_iso = transaction.get("date", "")
         date_str = (
@@ -354,17 +356,31 @@ def flatten_transactions(
                 category, is_ps_plus, classification_source = "", "", ""
                 classification_evidence = ""
 
-            relationship_values = (
-                relationships.relationship_fields(
-                    locale=cfg.get_locale(),
+            relationship_values = {}
+            if enriched:
+                override = (overrides or {}).get(
+                    relationships.product_key(locale, sku)
+                )
+                (
+                    category,
+                    classification_source,
+                    classification_evidence,
+                ) = manual.apply_classification_override(
+                    override,
+                    category,
+                    classification_source,
+                    classification_evidence,
+                )
+                relationship_values = relationships.relationship_fields(
+                    locale=locale,
                     sku=sku,
                     category=category,
                     info=info,
                     enrichment_status=result.get("status", ""),
                 )
-                if enriched
-                else {}
-            )
+                manual.apply_relationship_override(
+                    relationship_values, override, category
+                )
 
             rows.append(
                 {
@@ -648,6 +664,7 @@ def _write_csv(
         )
 
     cache = store.load_cache() if enriched else {}
+    overrides = manual.load_overrides() if enriched else {}
     enrichment_results: dict[str, dict] = {}
     skus: set[str] = set()
 
@@ -704,6 +721,7 @@ def _write_csv(
             enriched,
             enrichment_results=enrichment_results,
             include_payment_details=include_payment_details,
+            overrides=overrides,
         )
     except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
         raise PSNTransactionsError(
@@ -746,6 +764,7 @@ def _write_csv(
                 enriched,
                 enrichment_results=enrichment_results,
                 include_payment_details=include_payment_details,
+                overrides=overrides,
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
             raise PSNTransactionsError(
@@ -758,6 +777,13 @@ def _write_csv(
         console.print(
             "Referenced base games — zero-cost purchase rows included: "
             f"{len(reference_rows)}"
+        )
+
+    if overrides:
+        matched = {row["product_key"] for row in rows} & set(overrides)
+        console.print(
+            f"Manual overrides — applied: {len(matched)}; "
+            f"not matched to any output row: {len(overrides) - len(matched)}"
         )
 
     fields = list(ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS)

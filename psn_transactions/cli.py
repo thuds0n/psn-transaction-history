@@ -223,5 +223,32 @@ def enrich(
     )
 
 
+@app.command()
+def curate(
+    input: str = typer.Option(
+        "psn_transactions_enriched.csv",
+        "--input",
+        help="Enriched CSV from the enrich command.",
+    ),
+) -> None:
+    """Add products needing a manual decision to the private overrides file."""
+    from pathlib import Path
+
+    from psn_transactions import overrides
+
+    try:
+        added, already_listed = overrides.seed_overrides(Path(input))
+    except PSNTransactionsError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"Added {added} products needing a decision to {overrides.OVERRIDES_FILE}; "
+        f"{already_listed} were already listed."
+    )
+    typer.echo(
+        "Fill in category, base_game_key (a product_key, or none) or "
+        "base_game_title, then run enrich again."
+    )
+
 if __name__ == "__main__":
     app()

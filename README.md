@@ -168,6 +168,39 @@ described in `enrichment_detail` where applicable. Store responses receive the
 same structural checks; malformed responses are reported as temporary lookup
 failures without including response bodies.
 
+### 5. Curate relationships manually
+
+Some products cannot be resolved from Store data: add-ons without a Store
+parent, products with several parents, and delisted products the Store no
+longer describes. Record decisions for them in a private overrides file:
+
+```bash
+psn-transactions curate
+psn-transactions curate --input my_transactions_enriched.csv
+```
+
+`curate` reads the enriched CSV and adds each product that still needs a
+decision to `~/.psn-transactions/relationship_overrides.csv`, which is created
+with owner-only permissions. Products already in the file are left untouched,
+so the command can be repeated after each export.
+
+Open the file in a spreadsheet and fill in any of the decision columns:
+
+| Column | Meaning |
+|---|---|
+| `category` | Replacement category, such as `Full Game` or `DLC / Add-on` |
+| `base_game_key` | The base game's `product_key`, copied from the enriched CSV, or `none` for no base game |
+| `base_game_title` | The base game's title, when it has no `product_key` (for example, a disc purchase) |
+| `notes` | Your evidence; shown as `relationship_evidence` |
+
+`product_key`, `product`, `current_category` and `reason` are for reference.
+Run `enrich` again to apply the decisions. Manual decisions always take
+precedence over Store evidence and have a `classification_source` or
+`relationship_source` of `manual` and a `relationship_status` of `manual`.
+A title-only decision links to an owned game or bundle only when its product
+name matches that title exactly. Invalid rows stop the export with the row
+number, and the command reports how many decisions matched an output row.
+
 ## CSV columns
 
 | Column | Description |
@@ -218,19 +251,19 @@ lookups. Pressing Control-C saves completed results before the command exits.
 | `add_on_subtype` | Store-reported subtype such as `season_pass`, `level`, `costume`, `virtual_currency`, or `unspecified_add_on` |
 | `add_on_subtype_source` | Source of the subtype evidence; currently `store_api` when present |
 | `add_on_subtype_evidence` | Exact Store classification used for the subtype |
-| `relationship_type` | `add_on_of` for add-on dependencies or `store_parent` for other Store parent links |
+| `relationship_type` | `add_on_of` for add-on dependencies, `store_parent` for other Store parent links, or `edition_of` for a manual non-add-on link |
 | `base_game_key` | Locale-scoped parent product key when one parent is usable |
 | `base_game_title` | Store-reported parent title; never inferred from product-name similarity |
 | `relationship_status` | Whether the relationship is verified, only a candidate, conflicting, unresolved, or not applicable |
-| `relationship_source` | Source of relationship evidence; currently `store_api` when present |
+| `relationship_source` | Source of relationship evidence: `store_api` or `manual` |
 | `relationship_evidence` | Explicit Store fields and parent product IDs supporting the status |
 | `base_game_ownership` | For add-ons with a base game: `paid`, `free`, or `not_in_history` |
-| `base_game_match` | `product` when the base game itself was purchased, or `edition` when an owned edition or bundle names it as its Store parent |
+| `base_game_match` | `product` when the base game itself was purchased, `edition` when an owned edition or bundle names it as its parent, or `title` for a manual title-only decision |
 | `base_game_order_item_id` | `order_item_id` of the purchase row that owns the base game, for linking records |
 | `inclusion_reason` | With `--paid-only`: `paid`, or `base_game_reference` for a zero-cost base game included for linking |
 | `enrichment_status` | Whether Store metadata succeeded, was unavailable, or failed |
 | `enrichment_detail` | Concise lookup outcome or failure detail, without response bodies |
-| `classification_source` | Evidence used: `store_api` (content type, top category, or Store display, secondary and product-type classifications), `transaction`, `product_name`, `heuristic`, or `unknown` |
+| `classification_source` | Evidence used: `store_api` (content type, top category, or Store display, secondary and product-type classifications), `transaction`, `product_name`, `heuristic`, `manual`, or `unknown` |
 | `classification_evidence` | Specific rule or metadata value used for classification |
 | `is_ps_plus` | `True` only when the product name supplies PS Plus evidence; otherwise empty |
 
@@ -259,6 +292,7 @@ metadata and have an enrichment status of `not_applicable`.
 | Status | Meaning |
 |---|---|
 | `verified` | Store metadata explicitly identifies add-on content and supplies exactly one parent product |
+| `manual` | A decision in the private relationship overrides file supplies the base game |
 | `candidate` | The Store supplies one parent link, but does not explicitly identify the child as add-on content |
 | `conflict` | The Store supplies multiple possible parents, so no base game is selected |
 | `unresolved` | The row is classified as DLC/add-on content but has no explicit Store parent relationship |
@@ -309,7 +343,8 @@ The processing code is separated by responsibility:
 
 - `classify.py` contains pure classification rules and evidence generation.
 - `relationships.py` contains pure add-on subtype and relationship evidence
-  handling.
+  handling, and links add-ons to the purchase that owns their base game.
+- `overrides.py` loads, validates, applies and seeds private manual decisions.
 - `enrich.py` contains the serial Store client and locale-scoped cache.
 - `export.py` contains CSV schemas, transaction flattening and the explicit
   `export_csv()` and `enrich_csv()` entry points.

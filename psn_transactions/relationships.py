@@ -239,15 +239,23 @@ def relationship_fields(
 
 
 _BASE_GAME_OWNER_CATEGORIES = {"Full Game", "Bundle"}
+_EDITION_RELATIONSHIP_TYPES = {"store_parent", "edition_of"}
 
 
-def _owned_base_games(rows: list[dict]) -> dict[str, tuple]:
-    """Return the preferred owning purchase row for each product key."""
+def _title_key(value: str) -> str:
+    """Normalise a title for exact matching of a manually entered base game."""
+    cleaned = re.sub(r"[\u2122\u00ae\u00a9]", "", value or "")
+    return " ".join(cleaned.casefold().split())
+
+
+def _owned_base_games(rows: list[dict]) -> tuple[dict[str, tuple], dict[str, tuple]]:
+    """Return preferred owning purchase rows by product key and by title."""
     owners: dict[str, tuple] = {}
+    title_owners: dict[str, tuple] = {}
 
-    def offer(key: str, candidate: tuple) -> None:
-        if key and (key not in owners or candidate < owners[key]):
-            owners[key] = candidate
+    def offer(key: str, candidate: tuple, index: dict[str, tuple] = owners) -> None:
+        if key and (key not in index or candidate < index[key]):
+            index[key] = candidate
 
     for row in rows:
         item_id = row.get("order_item_id") or ""
@@ -261,32 +269,46 @@ def _owned_base_games(rows: list[dict]) -> dict[str, tuple]:
             row.get("product_key") or "",
             (not paid, 0, row.get("date") or "", item_id, ownership, "product"),
         )
+        if row.get("category") in _BASE_GAME_OWNER_CATEGORIES:
+            offer(
+                _title_key(row.get("product") or ""),
+                (not paid, 0, row.get("date") or "", item_id, ownership, "title"),
+                title_owners,
+            )
         if (
-            row.get("relationship_type") == "store_parent"
+            row.get("relationship_type") in _EDITION_RELATIONSHIP_TYPES
             and row.get("category") in _BASE_GAME_OWNER_CATEGORIES
         ):
             offer(
                 row.get("base_game_key") or "",
                 (not paid, 1, row.get("date") or "", item_id, ownership, "edition"),
             )
-    return owners
+    return owners, title_owners
 
 
 def link_owned_base_games(rows: list[dict]) -> None:
     """Point add-on rows at the purchase row that owns their Store base game.
 
     A base game is owned when a purchase row has the same product key, or when
-    an owned edition or bundle names that base game as its single Store parent.
+    an owned edition or bundle names that base game as its single parent. A
+    manual decision that gives only a title matches an owned game or bundle
+    with exactly that title; titles never create links on their own.
     """
-    owners = _owned_base_games(rows)
+    owners, title_owners = _owned_base_games(rows)
     for row in rows:
         row["base_game_ownership"] = ""
         row["base_game_match"] = ""
         row["base_game_order_item_id"] = ""
-        key = row.get("base_game_key") or ""
-        if row.get("relationship_type") != "add_on_of" or not key:
+        if row.get("relationship_type") != "add_on_of":
             continue
-        owner = owners.get(key)
+        key = row.get("base_game_key") or ""
+        title = row.get("base_game_title") or ""
+        if key:
+            owner = owners.get(key)
+        elif row.get("relationship_status") == "manual" and title:
+            owner = title_owners.get(_title_key(title))
+        else:
+            continue
         if owner is None:
             row["base_game_ownership"] = "not_in_history"
             continue
@@ -302,4 +324,5 @@ def missing_base_game_keys(rows: list[dict]) -> set[str]:
         row["base_game_key"]
         for row in rows
         if row.get("base_game_ownership") == "not_in_history"
+        and row.get("base_game_key")
     }
