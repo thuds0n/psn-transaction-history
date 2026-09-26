@@ -5,23 +5,49 @@
     "en-us|EX0001-PPSA00001_00-ORBIT": {
       "status": "success",
       "fetched_at": "2026-01-04T00:00:00Z",
+      "metadata_schema_version": 2,
       "metadata": {
+        "store_product_id": "EX0001-PPSA00001_00-ORBIT",
+        "store_product_name": "Example Orbit",
         "content_type": "FULL_GAME",
         "top_category": "downloadable_game",
         "platform": "PS5",
         "publisher": "Example Studio",
-        "release_date": "2026-01-01T00:00:00Z"
+        "release_date": "2026-01-01T00:00:00Z",
+        "store_display_classification": "FULL_GAME",
+        "product_type": "GAME",
+        "primary_classification": "GAME",
+        "secondary_classification": "",
+        "tertiary_classification": "",
+        "parent_products": []
       }
     },
     "en-us|EX0001-PPSA00002_00-BONUS": {
       "status": "success",
       "fetched_at": "2026-01-04T00:00:00Z",
+      "metadata_schema_version": 2,
       "metadata": {
+        "store_product_id": "EX0001-PPSA00002_00-BONUS",
+        "store_product_name": "Example Bonus Add-on",
         "content_type": "ADD_ON",
         "top_category": "add_on",
         "platform": "PS5",
         "publisher": "Example Studio",
-        "release_date": "2026-01-02T00:00:00Z"
+        "release_date": "2026-01-02T00:00:00Z",
+        "store_display_classification": "ADD_ON_PACK",
+        "product_type": "GAME_BUNDLE",
+        "primary_classification": "GAME_CONTENT",
+        "secondary_classification": "ADD_ON",
+        "tertiary_classification": "",
+        "parent_products": [
+          {
+            "product_id": "EX0001-PPSA00001_00-ORBIT",
+            "name": "Example Orbit",
+            "title_name": "Example Orbit",
+            "content_type": "FULL_GAME",
+            "top_category": "downloadable_game"
+          }
+        ]
       }
     }
   }

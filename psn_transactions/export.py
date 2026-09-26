@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from psn_transactions import classify
+from psn_transactions import classify, config as cfg, relationships
 from psn_transactions import enrich as store
 from psn_transactions.errors import PSNTransactionsError
 from psn_transactions.storage import atomic_write_csv
@@ -22,6 +22,10 @@ CORE_CSV_FIELDS = [
 ENRICHED_CSV_FIELDS = [
     "date", "transaction_id", "order_item_id", "product", "category",
     "content_type", "top_category", "platform", "publisher", "release_date",
+    "product_key", "add_on_subtype", "add_on_subtype_source",
+    "add_on_subtype_evidence", "relationship_type", "base_game_key",
+    "base_game_title", "relationship_status", "relationship_source",
+    "relationship_evidence",
     "enrichment_status", "enrichment_detail", "classification_source",
     "classification_evidence",
     "paid", "paid_minor", "original", "original_minor", "discount",
@@ -271,6 +275,16 @@ def flatten_transactions(
                     "platform": "",
                     "publisher": "",
                     "release_date": "",
+                    "product_key": "",
+                    "add_on_subtype": "",
+                    "add_on_subtype_source": "",
+                    "add_on_subtype_evidence": "",
+                    "relationship_type": "",
+                    "base_game_key": "",
+                    "base_game_title": "",
+                    "relationship_status": "not_applicable" if enriched else "",
+                    "relationship_source": "",
+                    "relationship_evidence": "",
                     "enrichment_status": "not_applicable" if enriched else "",
                     "enrichment_detail": "",
                     "classification_source": "transaction" if enriched else "",
@@ -335,6 +349,18 @@ def flatten_transactions(
                 category, is_ps_plus, classification_source = "", "", ""
                 classification_evidence = ""
 
+            relationship_values = (
+                relationships.relationship_fields(
+                    locale=cfg.get_locale(),
+                    sku=sku,
+                    category=category,
+                    info=info,
+                    enrichment_status=result.get("status", ""),
+                )
+                if enriched
+                else {}
+            )
+
             rows.append(
                 {
                     "date": date_str,
@@ -347,6 +373,7 @@ def flatten_transactions(
                     "platform": info.get("platform", ""),
                     "publisher": info.get("publisher", ""),
                     "release_date": info.get("release_date", ""),
+                    **relationship_values,
                     "enrichment_status": result.get("status", "") if enriched else "",
                     "enrichment_detail": enrichment_detail if enriched else "",
                     "classification_source": classification_source,
@@ -443,6 +470,10 @@ def _print_enrichment_summary(
     source_counts = Counter(
         row.get("classification_source") or "none" for row in rows
     )
+    relationship_counts = Counter(
+        row.get("relationship_status") or "none" for row in rows
+    )
+    subtype_counts = Counter(row.get("add_on_subtype") or "none" for row in rows)
     status_summary = ", ".join(
         f"{status.replace('_', ' ')}: {count}"
         for status, count in sorted(status_counts.items())
@@ -450,6 +481,14 @@ def _print_enrichment_summary(
     source_summary = ", ".join(
         f"{source.replace('_', ' ')}: {count}"
         for source, count in sorted(source_counts.items())
+    ) or "none"
+    relationship_summary = ", ".join(
+        f"{status.replace('_', ' ')}: {count}"
+        for status, count in sorted(relationship_counts.items())
+    ) or "none"
+    subtype_summary = ", ".join(
+        f"{subtype.replace('_', ' ')}: {count}"
+        for subtype, count in sorted(subtype_counts.items())
     ) or "none"
 
     console.print(
@@ -467,6 +506,8 @@ def _print_enrichment_summary(
     )
     console.print(f"Lookup status — {status_summary}")
     console.print(f"Classification sources — {source_summary}")
+    console.print(f"Relationship status — {relationship_summary}")
+    console.print(f"Add-on subtypes — {subtype_summary}")
 
 
 def load_transactions(json_path: str) -> list[dict]:

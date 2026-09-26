@@ -26,6 +26,7 @@ from psn_transactions.storage import (
 SKU_CACHE_FILE = app_dir() / "sku_cache.json"
 _CHIHIRO_TEMPLATE = "https://store.playstation.com/store/api/chihiro/00_09_000/container/{country}/{lang}/999/{sku}"
 CACHE_SCHEMA_VERSION = 2
+STORE_METADATA_SCHEMA_VERSION = 2
 CACHE_SOURCE = "playstation-store-chihiro"
 NOT_FOUND_CACHE_TTL = timedelta(days=7)
 NO_METADATA_CACHE_TTL = timedelta(days=1)
@@ -44,6 +45,7 @@ class EnrichmentResult(TypedDict):
     cached: bool
     detail: NotRequired[str]
     network_requested: NotRequired[bool]
+    metadata_current: NotRequired[bool]
 
 
 def _chihiro_url(sku_base: str) -> str:
@@ -100,6 +102,12 @@ def _metadata_is_useful(metadata: dict) -> bool:
             "platform",
             "publisher",
             "release_date",
+            "store_display_classification",
+            "product_type",
+            "primary_classification",
+            "secondary_classification",
+            "tertiary_classification",
+            "parent_products",
         )
     )
 
@@ -119,6 +127,7 @@ def _migrate_legacy_cache(cache: dict) -> dict:
             "status": "success",
             "fetched_at": fetched_at,
             "metadata": metadata,
+            "metadata_schema_version": 1,
         }
     return migrated
 
@@ -174,6 +183,8 @@ def _cached_result(
     sku: str,
     cache: dict,
     now: datetime | None = None,
+    *,
+    allow_stale_metadata: bool = False,
 ) -> EnrichmentResult | None:
     record = cache["entries"].get(_cache_key(sku))
     if not isinstance(record, dict):
@@ -188,6 +199,11 @@ def _cached_result(
         return None
     if status == "success" and not _metadata_is_useful(metadata):
         cache["entries"].pop(_cache_key(sku), None)
+        return None
+    metadata_current = (
+        record.get("metadata_schema_version") == STORE_METADATA_SCHEMA_VERSION
+    )
+    if status == "success" and not metadata_current and not allow_stale_metadata:
         return None
 
     fetched_at = _parse_cache_time(record.get("fetched_at"))
@@ -206,12 +222,15 @@ def _cached_result(
             "not_found": "HTTP 404",
             "no_metadata": "Cached response contained no supported metadata",
         }.get(status, "")
-    return {
+    result: EnrichmentResult = {
         "status": status,
         "metadata": metadata,
         "cached": True,
         "detail": detail,
     }
+    if status == "success" and not metadata_current:
+        result["metadata_current"] = False
+    return result
 
 
 def _normalise_content_type(attrs: dict) -> str:
@@ -244,6 +263,50 @@ def _normalise_text_list(value: Any) -> str:
             item.strip() for item in value if isinstance(item, str) and item.strip()
         )
     return ""
+
+
+_CLASSIFICATION_FIELDS = (
+    "store_display_classification",
+    "product_type",
+    "primary_classification",
+    "secondary_classification",
+    "tertiary_classification",
+)
+
+
+def _normalise_classification(metadata: dict, field: str) -> str:
+    value = metadata.get(field)
+    if isinstance(value, dict):
+        value = value.get("values")
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = [item for item in value if isinstance(item, str)]
+    else:
+        values = []
+    return "; ".join(
+        token for item in values if (token := _normalise_token(item))
+    )
+
+
+def _normalise_parent_products(data: dict) -> list[dict[str, str]]:
+    products = []
+    for parent in data.get("parent_links") or []:
+        product_id = parent.get("id") or ""
+        if not product_id:
+            continue
+        products.append(
+            {
+                "product_id": product_id.strip(),
+                "name": (parent.get("name") or "").strip(),
+                "title_name": (parent.get("title_name") or "").strip(),
+                "content_type": _normalise_token(
+                    parent.get("game_contentType") or ""
+                ),
+                "top_category": (parent.get("top_category") or "").strip(),
+            }
+        )
+    return products
 
 
 def _store_response_error(data: dict) -> str | None:
@@ -302,18 +365,79 @@ def _store_response_error(data: dict) -> str | None:
             )
         if any(not isinstance(item, str) for item in value):
             return f"{field} list entries must all be strings"
+
+    for field in ("id", "name"):
+        value = data.get(field)
+        if value is not None and not isinstance(value, str):
+            return f"{field} must be a string or null, found {type(value).__name__}"
+
+    metadata = data.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return f"metadata must be an object or null, found {type(metadata).__name__}"
+    if isinstance(metadata, dict):
+        for field in _CLASSIFICATION_FIELDS:
+            value = metadata.get(field)
+            if value is None:
+                continue
+            if isinstance(value, dict):
+                value = value.get("values")
+            if isinstance(value, str):
+                continue
+            if not isinstance(value, list):
+                return (
+                    f"metadata.{field}.values must be a list or string, "
+                    f"found {type(value).__name__}"
+                )
+            if any(not isinstance(item, str) for item in value):
+                return f"metadata.{field}.values entries must all be strings"
+
+    parent_links = data.get("parent_links")
+    if parent_links is not None:
+        if not isinstance(parent_links, list):
+            return (
+                "parent_links must be a list or null, "
+                f"found {type(parent_links).__name__}"
+            )
+        for index, parent in enumerate(parent_links):
+            if not isinstance(parent, dict):
+                return (
+                    f"parent_links[{index}] must be an object, "
+                    f"found {type(parent).__name__}"
+                )
+            for field in (
+                "id",
+                "name",
+                "title_name",
+                "game_contentType",
+                "top_category",
+            ):
+                value = parent.get(field)
+                if value is not None and not isinstance(value, str):
+                    return (
+                        f"parent_links[{index}].{field} must be a string or null, "
+                        f"found {type(value).__name__}"
+                    )
     return None
 
 
 def _normalise_store_metadata(data: dict) -> dict:
     attributes = data.get("attributes")
     attrs = attributes if isinstance(attributes, dict) else data
+    raw_metadata = data.get("metadata")
+    classifications = raw_metadata if isinstance(raw_metadata, dict) else {}
     return {
+        "store_product_id": _normalise_text_list(data.get("id")),
+        "store_product_name": _normalise_text_list(data.get("name")),
         "content_type": _normalise_content_type(attrs),
         "top_category": _normalise_text_list(attrs.get("top_category")),
         "platform": _normalise_text_list(attrs.get("playable_platform")),
         "publisher": _normalise_text_list(attrs.get("provider_name")),
         "release_date": _normalise_text_list(attrs.get("release_date")),
+        **{
+            field: _normalise_classification(classifications, field)
+            for field in _CLASSIFICATION_FIELDS
+        },
+        "parent_products": _normalise_parent_products(data),
     }
 
 
@@ -345,6 +469,7 @@ def _record_cache_result(
         "status": status,
         "fetched_at": _format_cache_time(_utc_now()),
         "metadata": metadata,
+        "metadata_schema_version": STORE_METADATA_SCHEMA_VERSION,
     }
     if detail:
         record["detail"] = detail
@@ -482,8 +607,16 @@ def _enrich_skus(
     ) as progress:
         task = progress.add_task("SKU enrichment", total=len(skus))
         for representative, variants in grouped_skus:
-            cached = _cached_result(representative, cache)
-            if cached is not None and cache_mode is not CacheMode.REFRESH:
+            cached = _cached_result(
+                representative,
+                cache,
+                allow_stale_metadata=True,
+            )
+            if (
+                cached is not None
+                and cached.get("metadata_current", True)
+                and cache_mode is not CacheMode.REFRESH
+            ):
                 for sku in variants:
                     results[sku] = cached
                 progress.advance(task, len(variants))
@@ -512,8 +645,7 @@ def _enrich_skus(
             nonlocal completed_requests
             result = {**result, "network_requested": True}
             if (
-                cache_mode is CacheMode.REFRESH
-                and result.get("status") == "temporary_failure"
+                result.get("status") == "temporary_failure"
                 and stale_candidate is not None
                 and stale_candidate.get("status") == "success"
                 and _metadata_is_useful(stale_candidate.get("metadata") or {})

@@ -4,8 +4,66 @@ import re
 from typing import Any
 
 
+ADD_ON_DISPLAY_TYPES = frozenset(
+    {
+        "ADD_ON",
+        "ADD_ON_PACK",
+        "AVATAR",
+        "CHARACTER",
+        "COSTUME",
+        "EPISODE",
+        "LEVEL",
+        "MAP",
+        "SEASON_PASS",
+        "SOUNDTRACK",
+        "THEME",
+        "UPGRADE",
+        "VIRTUAL_CURRENCY",
+    }
+)
+_ADD_ON_SECONDARY_TYPES = {"ADDON", "ADD_ON", "ADD_ON_CONTENT", "DLC"}
+_FULL_GAME_DISPLAY_TYPES = {"FULL_GAME", "PREMIUM_EDITION"}
+
+
 def normalise_token(value: str) -> str:
     return re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
+
+
+def _store_tokens(info: dict, field: str) -> list[str]:
+    return [
+        token
+        for value in str(info.get(field) or "").split(";")
+        if (token := normalise_token(value))
+    ]
+
+
+def _store_classification(info: dict) -> tuple[str, str] | None:
+    """Classify from the Store's display, secondary and product-type fields."""
+    display = _store_tokens(info, "store_display_classification")
+    secondary = _store_tokens(info, "secondary_classification")
+    product_type = _store_tokens(info, "product_type")
+
+    for token in display:
+        if token == "VIRTUAL_CURRENCY":
+            return "In-Game Currency", f"store_display_classification={token}"
+    for token in secondary:
+        if token in _ADD_ON_SECONDARY_TYPES:
+            return "DLC / Add-on", f"secondary_classification={token}"
+    for token in display:
+        if token in ADD_ON_DISPLAY_TYPES:
+            return "DLC / Add-on", f"store_display_classification={token}"
+    for token in display:
+        if token == "GAME_BUNDLE":
+            return "Bundle", f"store_display_classification={token}"
+    for token in display:
+        if token in _FULL_GAME_DISPLAY_TYPES:
+            return "Full Game", f"store_display_classification={token}"
+    for token in product_type:
+        if token == "GAME_BUNDLE":
+            return "Bundle", f"product_type={token}"
+        if token == "GAME_FULL_GAME":
+            return "Full Game", f"product_type={token}"
+    return None
 
 
 def is_positive_number(value: Any) -> bool:
@@ -124,6 +182,11 @@ def classify_detailed(
             "store_api",
             "top_category=BUNDLE",
         )
+
+    store_classification = _store_classification(info)
+    if store_classification is not None:
+        category, evidence = store_classification
+        return category, True if is_plus_name else None, "store_api", evidence
 
     if sku_type_token in {"PRE_ORDER", "PRE_ORDER_VOUCHER"}:
         return (

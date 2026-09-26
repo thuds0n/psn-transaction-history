@@ -24,6 +24,7 @@ from psn_transactions.enrich import (
     _normalise_store_metadata,
     _sku_base,
 )
+from psn_transactions.relationships import relationship_fields
 from psn_transactions.export import (
     CORE_CSV_FIELDS,
     ENRICHED_CSV_FIELDS,
@@ -257,6 +258,87 @@ class TestClassify:
         assert source == "heuristic"
         assert evidence == 'product name contains "season pass"'
 
+    @pytest.mark.parametrize(
+        ("info", "expected_category", "expected_evidence"),
+        [
+            (
+                {
+                    "store_display_classification": "FULL_GAME",
+                    "product_type": "GAME_FULL_GAME",
+                    "secondary_classification": "GAME",
+                },
+                "Full Game",
+                "store_display_classification=FULL_GAME",
+            ),
+            (
+                {"store_display_classification": "PREMIUM_EDITION"},
+                "Full Game",
+                "store_display_classification=PREMIUM_EDITION",
+            ),
+            (
+                {"store_display_classification": "GAME_BUNDLE"},
+                "Bundle",
+                "store_display_classification=GAME_BUNDLE",
+            ),
+            (
+                {"product_type": "GAME_BUNDLE"},
+                "Bundle",
+                "product_type=GAME_BUNDLE",
+            ),
+            (
+                {"product_type": "GAME_FULL_GAME"},
+                "Full Game",
+                "product_type=GAME_FULL_GAME",
+            ),
+            (
+                {
+                    "store_display_classification": "ADD_ON_PACK",
+                    "product_type": "GAME_BUNDLE",
+                    "secondary_classification": "ADD_ON",
+                },
+                "DLC / Add-on",
+                "secondary_classification=ADD_ON",
+            ),
+            (
+                {"store_display_classification": "EPISODE"},
+                "DLC / Add-on",
+                "store_display_classification=EPISODE",
+            ),
+            (
+                {"store_display_classification": "VIRTUAL_CURRENCY"},
+                "In-Game Currency",
+                "store_display_classification=VIRTUAL_CURRENCY",
+            ),
+        ],
+    )
+    def test_store_classification_fields_classify_without_content_type(
+        self, info, expected_category, expected_evidence
+    ):
+        category, is_ps_plus, source, evidence = _classify_detailed(
+            "Example Product",
+            "EX0001-PPSA00001_00-EXAMPLE",
+            item_total=999,
+            item_original=999,
+            info=info,
+        )
+
+        assert category == expected_category
+        assert is_ps_plus is None
+        assert source == "store_api"
+        assert evidence == expected_evidence
+
+    def test_store_display_other_alone_is_not_add_on_evidence(self):
+        category, _is_ps_plus, source, _evidence = _classify_detailed(
+            "Example Product",
+            "EX0001-PPSA00001_00-EXAMPLE",
+            item_total=999,
+            item_original=999,
+            info={"store_display_classification": "OTHER"},
+        )
+
+        assert category == "Other"
+        assert source == "unknown"
+
 
 class TestStoreMetadataNormalisation:
     def test_current_chihiro_shape_is_normalised(self):
@@ -273,17 +355,193 @@ class TestStoreMetadataNormalisation:
         )
 
         assert metadata == {
+            "store_product_id": "",
+            "store_product_name": "",
             "content_type": "ADD_ON",
             "top_category": "add_on",
             "platform": "PS4™; PS5",
             "publisher": "Example Publisher",
             "release_date": "2025-01-01T00:00:00Z",
+            "store_display_classification": "",
+            "product_type": "",
+            "primary_classification": "",
+            "secondary_classification": "",
+            "tertiary_classification": "",
+            "parent_products": [],
         }
+
+    def test_relationship_metadata_is_normalised(self):
+        metadata = _normalise_store_metadata(
+            {
+                "id": "EX0001-PPSA00002_00-BONUS",
+                "name": "Example Bonus Add-on",
+                "game_contentType": "Add-On",
+                "top_category": "add_on",
+                "metadata": {
+                    "store_display_classification": {
+                        "values": ["ADD-ON_PACK"]
+                    },
+                    "secondary_classification": {"values": ["ADD-ON"]},
+                },
+                "parent_links": [
+                    {
+                        "id": "EX0001-PPSA00001_00-ORBIT",
+                        "name": "Example Orbit Standard Edition",
+                        "title_name": "Example Orbit",
+                        "game_contentType": "Full Game",
+                        "top_category": "downloadable_game",
+                    }
+                ],
+            }
+        )
+
+        assert metadata["store_product_id"] == "EX0001-PPSA00002_00-BONUS"
+        assert metadata["store_display_classification"] == "ADD_ON_PACK"
+        assert metadata["secondary_classification"] == "ADD_ON"
+        assert metadata["parent_products"] == [
+            {
+                "product_id": "EX0001-PPSA00001_00-ORBIT",
+                "name": "Example Orbit Standard Edition",
+                "title_name": "Example Orbit",
+                "content_type": "FULL_GAME",
+                "top_category": "downloadable_game",
+            }
+        ]
 
     def test_numeric_container_content_type_is_not_treated_as_category(self):
         metadata = _normalise_store_metadata({"content_type": "1"})
 
         assert metadata["content_type"] == ""
+
+
+class TestStoreRelationships:
+    def test_explicit_add_on_with_one_parent_is_verified(self):
+        fields = relationship_fields(
+            locale="en-us",
+            sku="EX0001-PPSA00002_00-BONUS-E001",
+            category="DLC / Add-on",
+            info={
+                "content_type": "ADD_ON",
+                "store_display_classification": "ADD_ON_PACK",
+                "parent_products": [
+                    {
+                        "product_id": "EX0001-PPSA00001_00-ORBIT",
+                        "name": "Example Orbit Standard Edition",
+                        "title_name": "Example Orbit",
+                    }
+                ],
+            },
+            enrichment_status="success",
+        )
+
+        assert fields["product_key"] == "en-us|EX0001-PPSA00002_00-BONUS"
+        assert fields["add_on_subtype"] == "add_on_pack"
+        assert fields["relationship_type"] == "add_on_of"
+        assert fields["base_game_key"] == "en-us|EX0001-PPSA00001_00-ORBIT"
+        assert fields["base_game_title"] == "Example Orbit"
+        assert fields["relationship_status"] == "verified"
+        assert fields["relationship_source"] == "store_api"
+        assert fields["relationship_evidence"] == (
+            "content_type=ADD_ON; parent_links "
+            "product_id=EX0001-PPSA00001_00-ORBIT"
+        )
+
+    def test_multiple_add_on_parents_are_a_conflict(self):
+        fields = relationship_fields(
+            locale="en-us",
+            sku="EX0001-PPSA00002_00-BONUS",
+            category="DLC / Add-on",
+            info={
+                "content_type": "ADD_ON",
+                "parent_products": [
+                    {"product_id": "EX0001-PPSA00001_00-STANDARD"},
+                    {"product_id": "EX0001-PPSA00001_00-DELUXE"},
+                ],
+            },
+            enrichment_status="success",
+        )
+
+        assert fields["relationship_status"] == "conflict"
+        assert fields["base_game_key"] == ""
+        assert "contains 2 products" in fields["relationship_evidence"]
+
+    def test_name_only_add_on_classification_remains_unresolved(self):
+        fields = relationship_fields(
+            locale="en-us",
+            sku="EX0001-PPSA00002_00-SEASON",
+            category="DLC / Add-on",
+            info={},
+            enrichment_status="cache_miss",
+        )
+
+        assert fields["relationship_type"] == "add_on_of"
+        assert fields["relationship_status"] == "unresolved"
+        assert fields["relationship_source"] == ""
+        assert fields["base_game_title"] == ""
+        assert fields["add_on_subtype"] == ""
+
+    def test_subscription_with_add_on_store_type_has_no_relationship(self):
+        fields = relationship_fields(
+            locale="en-us",
+            sku="EX0001-PPSA00009_00-RENEWAL",
+            category="Subscription",
+            info={"content_type": "ADD_ON"},
+            enrichment_status="success",
+        )
+
+        assert fields["product_key"] == "en-us|EX0001-PPSA00009_00-RENEWAL"
+        assert fields["relationship_status"] == "not_applicable"
+        assert fields["relationship_type"] == ""
+        assert fields["relationship_evidence"] == ""
+        assert fields["add_on_subtype"] == ""
+
+    def test_non_add_on_parent_is_only_a_candidate(self):
+        fields = relationship_fields(
+            locale="en-us",
+            sku="EX0001-PPSA00003_00-EXPANSION",
+            category="Full Game",
+            info={
+                "content_type": "BUNDLE",
+                "parent_products": [
+                    {
+                        "product_id": "EX0001-PPSA00001_00-ORBIT",
+                        "title_name": "Example Orbit",
+                    }
+                ],
+            },
+            enrichment_status="success",
+        )
+
+        assert fields["relationship_type"] == "store_parent"
+        assert fields["relationship_status"] == "candidate"
+        assert fields["base_game_title"] == "Example Orbit"
+
+    @pytest.mark.parametrize(
+        ("display_classification", "expected"),
+        [
+            ("SEASON_PASS", "season_pass"),
+            ("LEVEL", "level"),
+            ("COSTUME", "costume"),
+            ("VIRTUAL_CURRENCY", "virtual_currency"),
+            ("EPISODE", "episode"),
+        ],
+    )
+    def test_explicit_store_subtypes_are_preserved(
+        self, display_classification, expected
+    ):
+        fields = relationship_fields(
+            locale="en-us",
+            sku="EX0001-PPSA00002_00-BONUS",
+            category="DLC / Add-on",
+            info={"store_display_classification": display_classification},
+            enrichment_status="success",
+        )
+
+        assert fields["add_on_subtype"] == expected
+        assert fields["add_on_subtype_source"] == "store_api"
+        assert fields["add_on_subtype_evidence"] == (
+            f"store_display_classification={display_classification}"
+        )
 
 # ---------------------------------------------------------------------------
 # _flatten
@@ -742,11 +1000,27 @@ class TestExportIntegrity:
 
             def json(self):
                 return {
+                    "id": "UP001-CUSA00001_00-ADDON",
+                    "name": "Some Add-on",
                     "game_contentType": "Add-On",
                     "top_category": "add_on",
                     "playable_platform": ["PS5"],
                     "provider_name": "Example Publisher",
                     "release_date": "2025-01-01T00:00:00Z",
+                    "metadata": {
+                        "store_display_classification": {
+                            "values": ["ADD-ON_PACK"]
+                        }
+                    },
+                    "parent_links": [
+                        {
+                            "id": "UP001-CUSA00001_00-BASEGAME",
+                            "name": "Some Game",
+                            "title_name": "Some Game",
+                            "game_contentType": "Full Game",
+                            "top_category": "downloadable_game",
+                        }
+                    ],
                 }
 
         class FakeSession:
@@ -779,6 +1053,11 @@ class TestExportIntegrity:
         assert row["enrichment_detail"] == ""
         assert row["classification_source"] == "store_api"
         assert row["classification_evidence"] == "content_type=ADD_ON"
+        assert row["add_on_subtype"] == "add_on_pack"
+        assert row["relationship_type"] == "add_on_of"
+        assert row["base_game_key"] == "en-us|UP001-CUSA00001_00-BASEGAME"
+        assert row["base_game_title"] == "Some Game"
+        assert row["relationship_status"] == "verified"
         assert "success: 1" in capsys.readouterr().out
         assert cache_file.exists()
 
@@ -860,6 +1139,8 @@ class TestExportIntegrity:
         assert "product rows: 3" in output
         assert "requests: 1" in output
         assert "Classification sources — store api: 1" in output
+        assert "Relationship status — not applicable: 1" in output
+        assert "Add-on subtypes — none: 1" in output
 
     def test_export_cli_uses_raw_input_without_enrichment(self, monkeypatch):
         calls = []
@@ -1159,6 +1440,23 @@ class TestSkuCacheIntegrity:
         assert result["status"] == "no_metadata"
         assert cache["entries"]["en-us|SKU001"]["status"] == "no_metadata"
 
+    def test_product_id_alone_is_not_treated_as_useful_metadata(self, monkeypatch):
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"id": "EX0001-PPSA00001_00-ORBIT"}
+
+        monkeypatch.setattr(
+            store_enrich.requests,
+            "get",
+            lambda *args, **kwargs: FakeResponse(),
+        )
+
+        result = store_enrich._fetch_sku("SKU001")
+
+        assert result["status"] == "no_metadata"
+
     def test_malformed_store_structure_is_a_precise_temporary_failure(
         self, monkeypatch
     ):
@@ -1180,6 +1478,29 @@ class TestSkuCacheIntegrity:
         assert result["detail"] == (
             "Malformed Store response: attributes must be an object or null, "
             "found list"
+        )
+
+    def test_malformed_parent_links_are_a_precise_temporary_failure(
+        self, monkeypatch
+    ):
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"parent_links": [{"id": 123}]}
+
+        monkeypatch.setattr(
+            store_enrich.requests,
+            "get",
+            lambda *args, **kwargs: FakeResponse(),
+        )
+
+        result = store_enrich._fetch_sku("SKU001")
+
+        assert result["status"] == "temporary_failure"
+        assert result["detail"] == (
+            "Malformed Store response: parent_links[0].id must be a string "
+            "or null, found int"
         )
 
     def test_no_content_response_is_cached_as_no_metadata(self, monkeypatch):
@@ -1213,6 +1534,25 @@ class TestSkuCacheIntegrity:
         assert store_enrich._cached_result("SKU001", cache) is not None
         locale[0] = "en-gb"
         assert store_enrich._cached_result("SKU001", cache) is None
+
+    def test_old_success_metadata_is_refetched_but_available_for_fallback(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-us")
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001", cache, "success", {"content_type": "FULL_GAME"}
+        )
+        record = cache["entries"]["en-us|SKU001"]
+        record["metadata_schema_version"] = 1
+
+        assert store_enrich._cached_result("SKU001", cache) is None
+        stale = store_enrich._cached_result(
+            "SKU001", cache, allow_stale_metadata=True
+        )
+        assert stale is not None
+        assert stale["metadata_current"] is False
+        assert stale["metadata"]["content_type"] == "FULL_GAME"
 
     def test_expired_negative_cache_result_is_retried(self, monkeypatch):
         now = datetime(2026, 8, 2, tzinfo=timezone.utc)
@@ -1354,6 +1694,33 @@ class TestSerialEnrichment:
             "network_requested": True,
             "detail": "Refresh failed with HTTP 503; using cached metadata",
         }
+        assert cache["entries"][store_enrich._cache_key("SKU001")] == cached_record
+
+    def test_automatic_metadata_upgrade_keeps_stale_data_on_failure(
+        self, monkeypatch
+    ):
+        def fake_fetch(sku, session=None):
+            return {
+                "status": "temporary_failure",
+                "metadata": {},
+                "cached": False,
+                "detail": "HTTP 503",
+            }
+
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001", cache, "success", {"content_type": "ADD_ON"}
+        )
+        record = cache["entries"][store_enrich._cache_key("SKU001")]
+        record["metadata_schema_version"] = 1
+        cached_record = dict(record)
+
+        results = store_enrich._enrich_skus({"SKU001"}, cache)
+
+        assert results["SKU001"]["status"] == "stale_cache"
+        assert results["SKU001"]["metadata"]["content_type"] == "ADD_ON"
         assert cache["entries"][store_enrich._cache_key("SKU001")] == cached_record
 
     def test_refresh_not_found_replaces_previous_success(self, monkeypatch):

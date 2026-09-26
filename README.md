@@ -151,7 +151,8 @@ Normal runs show progress, important failures and the saved output path without
 printing purchase names or identifiers. Add `--summary` for detailed aggregate
 counts covering transactions, product rows, output rows, unique SKUs,
 normalised lookup keys, cache hits, network requests, lookup statuses and
-classification sources. No separate summary file is created.
+classification sources, relationship statuses and add-on subtypes. No separate
+summary file is created.
 
 Export validates the PSN structures it consumes, including product lists,
 line-item identifiers, SKUs, product names and numeric item totals. Structural
@@ -207,9 +208,19 @@ lookups. Pressing Control-C saves completed results before the command exits.
 | `platform` | Playable platform or platforms reported by the Store |
 | `publisher` | Provider or publisher reported by the Store |
 | `release_date` | Release date reported by the Store |
+| `product_key` | Locale-scoped, normalised Store product key for durable joins |
+| `add_on_subtype` | Store-reported subtype such as `season_pass`, `level`, `costume`, `virtual_currency`, or `unspecified_add_on` |
+| `add_on_subtype_source` | Source of the subtype evidence; currently `store_api` when present |
+| `add_on_subtype_evidence` | Exact Store classification used for the subtype |
+| `relationship_type` | `add_on_of` for add-on dependencies or `store_parent` for other Store parent links |
+| `base_game_key` | Locale-scoped parent product key when one parent is usable |
+| `base_game_title` | Store-reported parent title; never inferred from product-name similarity |
+| `relationship_status` | Whether the relationship is verified, only a candidate, conflicting, unresolved, or not applicable |
+| `relationship_source` | Source of relationship evidence; currently `store_api` when present |
+| `relationship_evidence` | Explicit Store fields and parent product IDs supporting the status |
 | `enrichment_status` | Whether Store metadata succeeded, was unavailable, or failed |
 | `enrichment_detail` | Concise lookup outcome or failure detail, without response bodies |
-| `classification_source` | Evidence used: `store_api`, `transaction`, `product_name`, `heuristic`, or `unknown` |
+| `classification_source` | Evidence used: `store_api` (content type, top category, or Store display, secondary and product-type classifications), `transaction`, `product_name`, `heuristic`, or `unknown` |
 | `classification_evidence` | Specific rule or metadata value used for classification |
 | `is_ps_plus` | `True` only when the product name supplies PS Plus evidence; otherwise empty |
 
@@ -233,6 +244,22 @@ lookups. Pressing Control-C saves completed results before the command exits.
 Rows without a product list, such as wallet top-ups and refunds, use transaction
 metadata and have an enrichment status of `not_applicable`.
 
+**Relationship status values:**
+
+| Status | Meaning |
+|---|---|
+| `verified` | Store metadata explicitly identifies add-on content and supplies exactly one parent product |
+| `candidate` | The Store supplies one parent link, but does not explicitly identify the child as add-on content |
+| `conflict` | The Store supplies multiple possible parents, so no base game is selected |
+| `unresolved` | The row is classified as DLC/add-on content but has no explicit Store parent relationship |
+| `not_applicable` | No supported add-on or Store-parent relationship applies, including subscription renewals |
+
+`parent_links` is not treated as a universal DLC-to-base-game field. Bundles,
+editions and standalone expansions can also expose Store parents. A relationship
+is therefore `verified` only when the child has explicit Store add-on evidence
+and exactly one Store parent. Product-name guesses never populate base-game
+fields, and ambiguous parent links remain visible for manual curation.
+
 **Enrichment status values:**
 
 | Status | Meaning |
@@ -254,13 +281,19 @@ Store server failures are not cached, so the next `enrich` run can retry them.
 Successful results are reused until `--refresh` is requested. If refresh fails
 temporarily, the successful cache record is preserved; a confirmed 404 or valid
 no-metadata response replaces it. Changing locale does not reuse metadata from
-another regional Store.
+another regional Store. Successful records written before relationship metadata
+was introduced are refreshed automatically; `--cache-only` reports those old
+records as cache misses rather than presenting incomplete relationships as
+current data. If that automatic refresh fails temporarily, the previous useful
+metadata is retained with `stale_cache` in the same way as an explicit refresh.
 
 ## Development
 
 The processing code is separated by responsibility:
 
 - `classify.py` contains pure classification rules and evidence generation.
+- `relationships.py` contains pure add-on subtype and relationship evidence
+  handling.
 - `enrich.py` contains the serial Store client and locale-scoped cache.
 - `export.py` contains CSV schemas, transaction flattening and the explicit
   `export_csv()` and `enrich_csv()` entry points.
