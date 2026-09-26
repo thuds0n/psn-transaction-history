@@ -25,7 +25,8 @@ ENRICHED_CSV_FIELDS = [
     "product_key", "add_on_subtype", "add_on_subtype_source",
     "add_on_subtype_evidence", "relationship_type", "base_game_key",
     "base_game_title", "relationship_status", "relationship_source",
-    "relationship_evidence",
+    "relationship_evidence", "base_game_ownership", "base_game_match",
+    "base_game_order_item_id", "inclusion_reason",
     "enrichment_status", "enrichment_detail", "classification_source",
     "classification_evidence",
     "paid", "paid_minor", "original", "original_minor", "discount",
@@ -285,6 +286,10 @@ def flatten_transactions(
                     "relationship_status": "not_applicable" if enriched else "",
                     "relationship_source": "",
                     "relationship_evidence": "",
+                    "base_game_ownership": "",
+                    "base_game_match": "",
+                    "base_game_order_item_id": "",
+                    "inclusion_reason": "",
                     "enrichment_status": "not_applicable" if enriched else "",
                     "enrichment_detail": "",
                     "classification_source": "transaction" if enriched else "",
@@ -374,6 +379,10 @@ def flatten_transactions(
                     "publisher": info.get("publisher", ""),
                     "release_date": info.get("release_date", ""),
                     **relationship_values,
+                    "base_game_ownership": "",
+                    "base_game_match": "",
+                    "base_game_order_item_id": "",
+                    "inclusion_reason": "",
                     "enrichment_status": result.get("status", "") if enriched else "",
                     "enrichment_detail": enrichment_detail if enriched else "",
                     "classification_source": classification_source,
@@ -438,6 +447,50 @@ def paid_only_transactions(txs: list[dict]) -> tuple[list[dict], Counter]:
     return filtered, counts
 
 
+def base_game_reference_transactions(
+    txs: list[dict],
+    base_game_keys: set[str],
+    locale: str,
+) -> list[dict]:
+    """Return copies holding the earliest zero-cost purchase of each base game."""
+    earliest: dict[str, tuple[str, int, int]] = {}
+    for tx_index, transaction in enumerate(txs):
+        products = (transaction.get("purchaseDetails") or {}).get(
+            "productPurchases"
+        ) or []
+        for product_index, product in enumerate(products):
+            if not classify.is_zero_number(product.get("total")):
+                continue
+            key = relationships.product_key(locale, product.get("skuId") or "")
+            if key not in base_game_keys:
+                continue
+            candidate = (transaction.get("date") or "", tx_index, product_index)
+            if key not in earliest or candidate < earliest[key]:
+                earliest[key] = candidate
+
+    selected: dict[int, list[int]] = {}
+    for _date, tx_index, product_index in earliest.values():
+        selected.setdefault(tx_index, []).append(product_index)
+
+    references = []
+    for tx_index, product_indexes in sorted(selected.items()):
+        transaction = txs[tx_index]
+        purchase_details = transaction.get("purchaseDetails") or {}
+        products = purchase_details.get("productPurchases") or []
+        references.append(
+            {
+                **transaction,
+                "purchaseDetails": {
+                    **purchase_details,
+                    "productPurchases": [
+                        products[index] for index in sorted(product_indexes)
+                    ],
+                },
+            }
+        )
+    return references
+
+
 def _product_row_count(txs: list[dict]) -> int:
     return sum(
         len((transaction.get("purchaseDetails") or {}).get("productPurchases") or [])
@@ -474,6 +527,11 @@ def _print_enrichment_summary(
         row.get("relationship_status") or "none" for row in rows
     )
     subtype_counts = Counter(row.get("add_on_subtype") or "none" for row in rows)
+    ownership_counts = Counter(
+        row.get("base_game_ownership")
+        for row in rows
+        if row.get("base_game_ownership")
+    )
     status_summary = ", ".join(
         f"{status.replace('_', ' ')}: {count}"
         for status, count in sorted(status_counts.items())
@@ -508,6 +566,11 @@ def _print_enrichment_summary(
     console.print(f"Classification sources — {source_summary}")
     console.print(f"Relationship status — {relationship_summary}")
     console.print(f"Add-on subtypes — {subtype_summary}")
+    ownership_summary = ", ".join(
+        f"{ownership.replace('_', ' ')}: {count}"
+        for ownership, count in sorted(ownership_counts.items())
+    ) or "none"
+    console.print(f"Linked base-game ownership — {ownership_summary}")
 
 
 def load_transactions(json_path: str) -> list[dict]:
@@ -558,6 +621,7 @@ def _write_csv(
     )
 
     transactions = load_transactions(json_path)
+    all_transactions = transactions
     console.print(f"Loaded {len(transactions)} transactions from {json_path}")
     transaction_count = len(transactions)
     try:
@@ -645,6 +709,56 @@ def _write_csv(
         raise PSNTransactionsError(
             f"Transaction JSON at {json_path} has an unexpected transaction structure."
         ) from exc
+
+    if enriched:
+        relationships.link_owned_base_games(rows)
+    if enriched and paid_only:
+        for row in rows:
+            row["inclusion_reason"] = "paid"
+        try:
+            reference_transactions = base_game_reference_transactions(
+                all_transactions,
+                relationships.missing_base_game_keys(rows),
+                cfg.get_locale(),
+            )
+        except (AttributeError, TypeError) as exc:
+            raise PSNTransactionsError(
+                f"Transaction JSON at {json_path} has an unexpected purchase structure."
+            ) from exc
+        reference_skus = {
+            product["skuId"]
+            for transaction in reference_transactions
+            for product in transaction["purchaseDetails"]["productPurchases"]
+            if product.get("skuId")
+        }
+        new_skus = reference_skus - set(enrichment_results)
+        if new_skus:
+            enrichment_results.update(
+                store.enrich_skus(new_skus, cache, cache_mode=cache_mode)
+            )
+            if not cache_only:
+                store.save_cache(cache)
+        skus |= reference_skus
+        try:
+            reference_rows = flatten_transactions(
+                reference_transactions,
+                cache,
+                enriched,
+                enrichment_results=enrichment_results,
+                include_payment_details=include_payment_details,
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            raise PSNTransactionsError(
+                f"Transaction JSON at {json_path} has an unexpected transaction structure."
+            ) from exc
+        for row in reference_rows:
+            row["inclusion_reason"] = "base_game_reference"
+        rows = sorted(rows + reference_rows, key=lambda row: row["date"], reverse=True)
+        relationships.link_owned_base_games(rows)
+        console.print(
+            "Referenced base games — zero-cost purchase rows included: "
+            f"{len(reference_rows)}"
+        )
 
     fields = list(ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS)
     if include_payment_details:

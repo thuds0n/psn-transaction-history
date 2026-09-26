@@ -24,7 +24,7 @@ from psn_transactions.enrich import (
     _normalise_store_metadata,
     _sku_base,
 )
-from psn_transactions.relationships import relationship_fields
+from psn_transactions.relationships import link_owned_base_games, relationship_fields
 from psn_transactions.export import (
     CORE_CSV_FIELDS,
     ENRICHED_CSV_FIELDS,
@@ -515,6 +515,86 @@ class TestStoreRelationships:
         assert fields["relationship_type"] == "store_parent"
         assert fields["relationship_status"] == "candidate"
         assert fields["base_game_title"] == "Example Orbit"
+
+    @staticmethod
+    def _owner_row(item_id, key, cents, date="2025-01-01 00:00", **extra):
+        return {
+            "order_item_id": item_id,
+            "product_key": key,
+            "paid_minor": cents,
+            "date": date,
+            "category": "Full Game",
+            "relationship_type": "",
+            "base_game_key": "",
+            **extra,
+        }
+
+    def test_owned_base_game_prefers_paid_exact_then_oldest(self):
+        base = "en-us|EX0001-CUSA00001_00-BASE"
+        add_on = self._owner_row(
+            "ITEM-ADDON",
+            "en-us|EX0001-CUSA00001_00-ADDON",
+            499,
+            category="DLC / Add-on",
+            relationship_type="add_on_of",
+            base_game_key=base,
+        )
+        rows = [
+            add_on,
+            self._owner_row("ITEM-FREE", base, 0, date="2020-01-01 00:00"),
+            self._owner_row(
+                "ITEM-DELUXE",
+                "en-us|EX0001-CUSA00001_00-DELUXE",
+                5999,
+                date="2021-01-01 00:00",
+                relationship_type="store_parent",
+                base_game_key=base,
+            ),
+            self._owner_row("ITEM-PAID-NEW", base, 2999, date="2024-01-01 00:00"),
+            self._owner_row("ITEM-PAID-OLD", base, 2999, date="2023-01-01 00:00"),
+        ]
+
+        link_owned_base_games(rows)
+
+        assert add_on["base_game_ownership"] == "paid"
+        assert add_on["base_game_match"] == "product"
+        assert add_on["base_game_order_item_id"] == "ITEM-PAID-OLD"
+        assert rows[1]["base_game_ownership"] == ""
+
+    def test_owned_edition_counts_as_owning_its_base_game(self):
+        base = "en-us|EX0001-CUSA00001_00-BASE"
+        add_on = self._owner_row(
+            "ITEM-ADDON",
+            "en-us|EX0001-CUSA00001_00-ADDON",
+            499,
+            category="DLC / Add-on",
+            relationship_type="add_on_of",
+            base_game_key=base,
+        )
+        rows = [
+            add_on,
+            self._owner_row(
+                "ITEM-DELUXE",
+                "en-us|EX0001-CUSA00001_00-DELUXE",
+                5999,
+                relationship_type="store_parent",
+                base_game_key=base,
+            ),
+            self._owner_row(
+                "ITEM-OTHER-DLC",
+                "en-us|EX0001-CUSA00001_00-OTHER",
+                299,
+                category="DLC / Add-on",
+                relationship_type="store_parent",
+                base_game_key=base,
+            ),
+        ]
+
+        link_owned_base_games(rows)
+
+        assert add_on["base_game_ownership"] == "paid"
+        assert add_on["base_game_match"] == "edition"
+        assert add_on["base_game_order_item_id"] == "ITEM-DELUXE"
 
     @pytest.mark.parametrize(
         ("display_classification", "expected"),
@@ -1141,6 +1221,121 @@ class TestExportIntegrity:
         assert "Classification sources — store api: 1" in output
         assert "Relationship status — not applicable: 1" in output
         assert "Add-on subtypes — none: 1" in output
+
+    def test_paid_only_includes_free_base_games_that_paid_add_ons_need(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        input_path = tmp_path / "transactions.json"
+        output_path = tmp_path / "transactions.csv"
+        cache_file = tmp_path / ".psn-transactions" / "sku_cache.json"
+        base_sku = "EX0001-CUSA00001_00-BASEGAME-E001"
+        orphan_parent = "EX0001-CUSA00009_00-DISCGAME"
+
+        def product(name, sku, cents, item_id):
+            return {
+                **make_product(name, sku, paid_cents=cents, original_cents=999),
+                "orderItemId": item_id,
+            }
+
+        input_path.write_text(
+            json.dumps(
+                [
+                    make_tx(
+                        tx_id="TX-DLC",
+                        date="2025-03-01T00:00:00.000Z",
+                        tx_total=1498,
+                        products=[
+                            product(
+                                "Example Expansion",
+                                "EX0001-CUSA00002_00-EXPANSION-E001",
+                                999,
+                                "ITEM-DLC",
+                            ),
+                            product(
+                                "Example Disc Add-on",
+                                "EX0001-CUSA00003_00-DISCADDON-E001",
+                                499,
+                                "ITEM-ORPHAN",
+                            ),
+                        ],
+                    ),
+                    make_tx(
+                        tx_id="TX-RECLAIM",
+                        date="2025-02-01T00:00:00.000Z",
+                        products=[product("Example Game", base_sku, 0, "ITEM-RECLAIM")],
+                    ),
+                    make_tx(
+                        tx_id="TX-CLAIM",
+                        date="2025-01-01T00:00:00.000Z",
+                        products=[
+                            product("Example Game", base_sku, 0, "ITEM-CLAIM"),
+                            product(
+                                "Unrelated Free Game",
+                                "EX0001-CUSA00004_00-UNRELATED-E001",
+                                0,
+                                "ITEM-UNRELATED",
+                            ),
+                        ],
+                    ),
+                ]
+            )
+        )
+        metadata = {
+            "EX0001-CUSA00002_00-EXPANSION-E001": {
+                "content_type": "ADD_ON",
+                "parent_products": [
+                    {"product_id": "EX0001-CUSA00001_00-BASEGAME", "title_name": "Example Game"}
+                ],
+            },
+            "EX0001-CUSA00003_00-DISCADDON-E001": {
+                "content_type": "ADD_ON",
+                "parent_products": [
+                    {"product_id": orphan_parent, "title_name": "Disc Game"}
+                ],
+            },
+            base_sku: {"content_type": "FULL_GAME"},
+        }
+        calls = []
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_fetch(sku, session=None):
+            calls.append(sku)
+            return {"status": "success", "metadata": metadata[sku], "cached": False}
+
+        monkeypatch.setattr(store_enrich, "SKU_CACHE_FILE", cache_file)
+        monkeypatch.setattr(store_enrich.cfg, "get_locale", lambda: "en-us")
+        monkeypatch.setattr(store_enrich, "_store_session", FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+
+        csv_export.enrich_csv(
+            json_path=str(input_path),
+            csv_path=str(output_path),
+            paid_only=True,
+            summary=True,
+        )
+
+        with output_path.open(newline="", encoding="utf-8") as output_file:
+            rows = {row["order_item_id"]: row for row in csv.DictReader(output_file)}
+        assert set(rows) == {"ITEM-DLC", "ITEM-ORPHAN", "ITEM-CLAIM"}
+        assert rows["ITEM-CLAIM"]["inclusion_reason"] == "base_game_reference"
+        assert rows["ITEM-CLAIM"]["category"] == "Full Game"
+        assert rows["ITEM-DLC"]["inclusion_reason"] == "paid"
+        assert rows["ITEM-DLC"]["base_game_ownership"] == "free"
+        assert rows["ITEM-DLC"]["base_game_match"] == "product"
+        assert rows["ITEM-DLC"]["base_game_order_item_id"] == "ITEM-CLAIM"
+        assert rows["ITEM-ORPHAN"]["base_game_ownership"] == "not_in_history"
+        assert rows["ITEM-ORPHAN"]["base_game_order_item_id"] == ""
+        assert calls.count(base_sku) == 1
+        assert "EX0001-CUSA00004_00-UNRELATED-E001" not in calls
+        output = capsys.readouterr().out
+        assert "zero-cost purchase rows included: 1" in output
+        assert "Linked base-game ownership — free: 1, not in history: 1" in output
 
     def test_export_cli_uses_raw_input_without_enrichment(self, monkeypatch):
         calls = []

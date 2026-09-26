@@ -2,7 +2,12 @@
 
 import re
 
-from psn_transactions.classify import ADD_ON_DISPLAY_TYPES, normalise_token
+from psn_transactions.classify import (
+    ADD_ON_DISPLAY_TYPES,
+    is_positive_number,
+    is_zero_number,
+    normalise_token,
+)
 
 
 _ADD_ON_CONTENT_TYPES = {"ADDON", "ADD_ON", "ADD_ON_CONTENT", "DLC"}
@@ -231,3 +236,70 @@ def relationship_fields(
             }
         )
     return fields
+
+
+_BASE_GAME_OWNER_CATEGORIES = {"Full Game", "Bundle"}
+
+
+def _owned_base_games(rows: list[dict]) -> dict[str, tuple]:
+    """Return the preferred owning purchase row for each product key."""
+    owners: dict[str, tuple] = {}
+
+    def offer(key: str, candidate: tuple) -> None:
+        if key and (key not in owners or candidate < owners[key]):
+            owners[key] = candidate
+
+    for row in rows:
+        item_id = row.get("order_item_id") or ""
+        amount = row.get("paid_minor")
+        paid = is_positive_number(amount)
+        if not item_id or not (paid or is_zero_number(amount)):
+            continue
+        ownership = "paid" if paid else "free"
+        # Ranking: paid before free, exact product before edition, then oldest.
+        offer(
+            row.get("product_key") or "",
+            (not paid, 0, row.get("date") or "", item_id, ownership, "product"),
+        )
+        if (
+            row.get("relationship_type") == "store_parent"
+            and row.get("category") in _BASE_GAME_OWNER_CATEGORIES
+        ):
+            offer(
+                row.get("base_game_key") or "",
+                (not paid, 1, row.get("date") or "", item_id, ownership, "edition"),
+            )
+    return owners
+
+
+def link_owned_base_games(rows: list[dict]) -> None:
+    """Point add-on rows at the purchase row that owns their Store base game.
+
+    A base game is owned when a purchase row has the same product key, or when
+    an owned edition or bundle names that base game as its single Store parent.
+    """
+    owners = _owned_base_games(rows)
+    for row in rows:
+        row["base_game_ownership"] = ""
+        row["base_game_match"] = ""
+        row["base_game_order_item_id"] = ""
+        key = row.get("base_game_key") or ""
+        if row.get("relationship_type") != "add_on_of" or not key:
+            continue
+        owner = owners.get(key)
+        if owner is None:
+            row["base_game_ownership"] = "not_in_history"
+            continue
+        _free, _edition, _date, item_id, ownership, match = owner
+        row["base_game_ownership"] = ownership
+        row["base_game_match"] = match
+        row["base_game_order_item_id"] = item_id
+
+
+def missing_base_game_keys(rows: list[dict]) -> set[str]:
+    """Return base-game keys that no row in ``rows`` currently owns."""
+    return {
+        row["base_game_key"]
+        for row in rows
+        if row.get("base_game_ownership") == "not_in_history"
+    }
