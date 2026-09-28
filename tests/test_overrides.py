@@ -264,11 +264,12 @@ def enrich_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(store_enrich, "_store_session", FakeSession)
     monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
 
-    def run():
+    def run(include_base_games=True):
         csv_export.enrich_csv(
             json_path=str(input_path),
             csv_path=str(output_path),
             paid_only=True,
+            include_base_games=include_base_games,
         )
         with output_path.open(newline="", encoding="utf-8") as file:
             return {row["order_item_id"]: row for row in csv.DictReader(file)}
@@ -313,6 +314,27 @@ class TestOverridesInEnrichment:
         assert delisted["base_game_title"] == "Disc Only Game"
         assert delisted["base_game_ownership"] == "not_in_history"
         assert "applied: 2; not matched to any output row: 1" in capsys.readouterr().out
+
+    def test_paid_only_excludes_free_base_games_unless_requested(
+        self, enrich_environment, isolated_overrides_file
+    ):
+        run, _output_path = enrich_environment
+        write_overrides(
+            isolated_overrides_file,
+            [
+                {
+                    "product_key": "en-us|EX0001-CUSA00002_00-MYSTERY",
+                    "base_game_key": BASE_KEY,
+                }
+            ],
+        )
+
+        rows = run(include_base_games=False)
+
+        assert "ITEM-BASE" not in rows
+        assert rows["ITEM-MYSTERY"]["base_game_ownership"] == "free"
+        assert rows["ITEM-MYSTERY"]["base_game_order_item_id"] == "ITEM-BASE"
+        assert rows["ITEM-MYSTERY"]["inclusion_reason"] == "paid"
 
     def test_curate_seeds_undecided_rows_and_preserves_decisions(
         self, enrich_environment, isolated_overrides_file

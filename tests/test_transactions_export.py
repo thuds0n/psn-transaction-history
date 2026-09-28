@@ -1317,6 +1317,7 @@ class TestExportIntegrity:
             json_path=str(input_path),
             csv_path=str(output_path),
             paid_only=True,
+            include_base_games=True,
             summary=True,
         )
 
@@ -1372,6 +1373,7 @@ class TestExportIntegrity:
                 "json_path": "psn_transactions_raw.json",
                 "csv_path": "psn_transactions_enriched.csv",
                 "paid_only": False,
+                "include_base_games": False,
                 "refresh": False,
                 "cache_only": False,
                 "summary": False,
@@ -1392,6 +1394,7 @@ class TestExportIntegrity:
             [
                 "enrich",
                 "--paid-only",
+                "--include-base-games",
                 "--refresh",
                 "--summary",
                 "--include-payment-details",
@@ -1404,12 +1407,32 @@ class TestExportIntegrity:
                 "json_path": "psn_transactions_raw.json",
                 "csv_path": "psn_transactions_enriched.csv",
                 "paid_only": True,
+                "include_base_games": True,
                 "refresh": True,
                 "cache_only": False,
                 "summary": True,
                 "include_payment_details": True,
             }
         ]
+
+    def test_include_base_games_requires_paid_only(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            csv_export, "enrich_csv", lambda **kwargs: calls.append(kwargs)
+        )
+
+        result = CliRunner().invoke(app, ["enrich", "--include-base-games"])
+
+        assert result.exit_code == 1
+        assert "requires --paid-only" in result.output
+        assert calls == []
+        with pytest.raises(PSNTransactionsError, match="requires --paid-only"):
+            csv_export._write_csv(
+                json_path="unused.json",
+                csv_path="unused.csv",
+                enriched=True,
+                include_base_games=True,
+            )
 
     def test_export_cli_forwards_payment_details_option(self, monkeypatch):
         calls = []

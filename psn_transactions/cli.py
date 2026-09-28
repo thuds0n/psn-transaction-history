@@ -116,6 +116,7 @@ def _enrich_csv(
     output_path: str,
     *,
     paid_only: bool,
+    include_base_games: bool,
     refresh: bool,
     cache_only: bool,
     summary: bool,
@@ -128,6 +129,7 @@ def _enrich_csv(
             json_path=input_path,
             csv_path=output_path,
             paid_only=paid_only,
+            include_base_games=include_base_games,
             refresh=refresh,
             cache_only=cache_only,
             summary=summary,
@@ -183,6 +185,14 @@ def enrich(
         "--paid-only",
         help="Include only product items with a positive item-level total.",
     ),
+    include_base_games: bool = typer.Option(
+        False,
+        "--include-base-games",
+        help=(
+            "With --paid-only, also include zero-cost purchases of base games "
+            "that paid add-ons belong to."
+        ),
+    ),
     refresh: bool = typer.Option(
         False,
         "--refresh",
@@ -212,10 +222,19 @@ def enrich(
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
+    if include_base_games and not paid_only:
+        typer.secho(
+            "--include-base-games requires --paid-only; without it every "
+            "purchase is already included.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
     _enrich_csv(
         input,
         output,
         paid_only=paid_only,
+        include_base_games=include_base_games,
         refresh=refresh,
         cache_only=cache_only,
         summary=summary,

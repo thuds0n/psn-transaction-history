@@ -131,11 +131,16 @@ usable numeric total and transactions without product rows are skipped before
 Store lookups. The command prints a count for each group so excluded data is not
 silent.
 
-One exception keeps add-on links usable: when a paid add-on's Store base game
-was only ever claimed at zero cost, such as through PlayStation Plus, the
-earliest zero-cost purchase of that base game is also included, with an
-`inclusion_reason` of `base_game_reference`. The command prints how many such
-rows were added.
+A paid add-on's base game may only ever have been claimed at zero cost, for
+example through PlayStation Plus. Its ownership is still reported as `free`,
+but the zero-cost row itself is excluded. Add `--include-base-games` to include
+the earliest zero-cost purchase of each such base game, with an
+`inclusion_reason` of `base_game_reference`, so every linked base game has a
+row in the output:
+
+```bash
+psn-transactions enrich --paid-only --include-base-games
+```
 
 Store cache behaviour can be selected explicitly:
 
@@ -259,8 +264,8 @@ lookups. Pressing Control-C saves completed results before the command exits.
 | `relationship_evidence` | Explicit Store fields and parent product IDs supporting the status |
 | `base_game_ownership` | For add-ons with a base game: `paid`, `free`, or `not_in_history` |
 | `base_game_match` | `product` when the base game itself was purchased, `edition` when an owned edition or bundle names it as its parent, or `title` for a manual title-only decision |
-| `base_game_order_item_id` | `order_item_id` of the purchase row that owns the base game, for linking records |
-| `inclusion_reason` | With `--paid-only`: `paid`, or `base_game_reference` for a zero-cost base game included for linking |
+| `base_game_order_item_id` | `order_item_id` of the purchase that owns the base game; with `--paid-only` alone, a zero-cost owner is not itself in the output |
+| `inclusion_reason` | With `--paid-only`: `paid`, or `base_game_reference` for a zero-cost base game added by `--include-base-games` |
 | `enrichment_status` | Whether Store metadata succeeded, was unavailable, or failed |
 | `enrichment_detail` | Concise lookup outcome or failure detail, without response bodies |
 | `classification_source` | Evidence used: `store_api` (content type, top category, or Store display, secondary and product-type classifications), `transaction`, `product_name`, `heuristic`, `manual`, or `unknown` |

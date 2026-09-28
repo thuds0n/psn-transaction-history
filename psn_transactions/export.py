@@ -621,6 +621,7 @@ def _write_csv(
     csv_path: str,
     enriched: bool,
     paid_only: bool = False,
+    include_base_games: bool = False,
     refresh: bool = False,
     cache_only: bool = False,
     summary: bool = False,
@@ -628,6 +629,8 @@ def _write_csv(
 ) -> None:
     if refresh and cache_only:
         raise PSNTransactionsError("--refresh and --cache-only cannot be used together.")
+    if include_base_games and not paid_only:
+        raise PSNTransactionsError("--include-base-games requires --paid-only.")
     cache_mode = (
         store.CacheMode.REFRESH
         if refresh
@@ -743,6 +746,22 @@ def _write_csv(
             raise PSNTransactionsError(
                 f"Transaction JSON at {json_path} has an unexpected purchase structure."
             ) from exc
+    if enriched and paid_only and not include_base_games:
+        # Zero-cost base games stay out of the output, but they are still owned.
+        free_owners = {
+            relationships.product_key(cfg.get_locale(), product.get("skuId") or ""): (
+                product.get("orderItemId") or ""
+            )
+            for transaction in reference_transactions
+            for product in transaction["purchaseDetails"]["productPurchases"]
+        }
+        for row in rows:
+            item_id = free_owners.get(row.get("base_game_key") or "")
+            if row.get("base_game_ownership") == "not_in_history" and item_id:
+                row["base_game_ownership"] = "free"
+                row["base_game_match"] = "product"
+                row["base_game_order_item_id"] = item_id
+    if enriched and paid_only and include_base_games:
         reference_skus = {
             product["skuId"]
             for transaction in reference_transactions
@@ -822,6 +841,7 @@ def enrich_csv(
     csv_path: str = "psn_transactions_enriched.csv",
     *,
     paid_only: bool = False,
+    include_base_games: bool = False,
     refresh: bool = False,
     cache_only: bool = False,
     summary: bool = False,
@@ -833,6 +853,7 @@ def enrich_csv(
         csv_path=csv_path,
         enriched=True,
         paid_only=paid_only,
+        include_base_games=include_base_games,
         refresh=refresh,
         cache_only=cache_only,
         summary=summary,
