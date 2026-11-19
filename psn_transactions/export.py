@@ -26,7 +26,7 @@ ENRICHED_CSV_FIELDS = [
     "add_on_subtype_evidence", "relationship_type", "base_game_key",
     "base_game_title", "relationship_status", "relationship_source",
     "relationship_evidence", "base_game_ownership", "base_game_match",
-    "base_game_order_item_id", "inclusion_reason",
+    "base_game_order_item_id", "game", "inclusion_reason",
     "enrichment_status", "enrichment_detail", "classification_source",
     "classification_evidence",
     "paid", "paid_minor", "original", "original_minor", "discount",
@@ -291,6 +291,7 @@ def flatten_transactions(
                     "base_game_ownership": "",
                     "base_game_match": "",
                     "base_game_order_item_id": "",
+                    "game": "",
                     "inclusion_reason": "",
                     "enrichment_status": "not_applicable" if enriched else "",
                     "enrichment_detail": "",
@@ -398,6 +399,7 @@ def flatten_transactions(
                     "base_game_ownership": "",
                     "base_game_match": "",
                     "base_game_order_item_id": "",
+                    "game": "",
                     "inclusion_reason": "",
                     "enrichment_status": result.get("status", "") if enriched else "",
                     "enrichment_detail": enrichment_detail if enriched else "",
@@ -798,6 +800,11 @@ def _write_csv(
             f"{len(reference_rows)}"
         )
 
+    if enriched:
+        relationships.assign_games(
+            rows,
+            {key: decision["game"] for key, decision in overrides.items() if decision["game"]},
+        )
     if overrides:
         matched = {row["product_key"] for row in rows} & set(overrides)
         console.print(

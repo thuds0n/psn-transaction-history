@@ -12,7 +12,10 @@ from psn_transactions.errors import PSNTransactionsError
 from psn_transactions.paths import app_dir
 from psn_transactions.relationships import (
     BASE_GAME_OWNER_CATEGORIES,
+    GAME_CATEGORIES,
+    clean_game_title,
     conflict_parent_ids,
+    loose_game_key,
     title_id,
 )
 from psn_transactions.storage import (
@@ -33,7 +36,7 @@ REFERENCE_FIELDS = [
     "reason",
     "candidates",
 ]
-DECISION_FIELDS = ["category", "base_game_key", "base_game_title", "notes"]
+DECISION_FIELDS = ["category", "base_game_key", "base_game_title", "game", "notes"]
 OVERRIDE_FIELDS = REFERENCE_FIELDS + DECISION_FIELDS
 
 CATEGORIES = {
@@ -51,6 +54,8 @@ CATEGORIES = {
     "Voucher",
 }
 _ADD_ON_CATEGORIES = {"DLC / Add-on", "In-Game Currency"}
+
+_DECIDING_FIELDS = ("category", "base_game_key", "base_game_title", "game")
 
 # Rows that still need a human decision when seeding the overrides file.
 _CURATION_STATUSES = {"unresolved", "conflict"}
@@ -127,10 +132,7 @@ def load_overrides(path: Path | None = None) -> dict[str, dict[str, str]]:
                 f"Relationship overrides row {row_number} has an invalid "
                 "base_game_key; use a product_key from the enriched CSV or none."
             )
-        if not any(
-            decision[field]
-            for field in ("category", "base_game_key", "base_game_title")
-        ):
+        if not any(decision[field] for field in _DECIDING_FIELDS):
             continue
         overrides[key] = decision
     return overrides
@@ -203,14 +205,11 @@ def _curation_reason(row: dict[str, str]) -> str:
 
 # Conflicts list their Store parents, so they are quickest to decide; products
 # the Store no longer describes need the most outside research.
-_REASON_ORDER = {"conflict": 0, "unresolved": 1, "unclassified": 2}
+_REASON_ORDER = {"conflict": 0, "unresolved": 1, "duplicate": 2, "unclassified": 3}
 
 
 def _sort_key(row: dict[str, str]) -> tuple:
-    decided = any(
-        (row.get(field) or "").strip()
-        for field in ("category", "base_game_key", "base_game_title")
-    )
+    decided = any((row.get(field) or "").strip() for field in _DECIDING_FIELDS)
     kind = (row.get("reason") or "").partition(":")[0]
     return (
         decided,
@@ -225,7 +224,11 @@ def _candidates(
     titles: dict[str, str],
     owners_by_title_id: dict[str, list[str]],
 ) -> str:
-    """Describe possible base games: Store parents, then owned same-title games."""
+    """Describe possible base games: Store parents, then owned same-title games.
+
+    Same-title suggestions are for add-ons and unclassified products; a full
+    game or bundle sharing a title ID is an edition, offered as a game merge.
+    """
     key = row.get("product_key", "")
     locale = key.partition("|")[0]
     described: dict[str, str] = {}
@@ -235,10 +238,38 @@ def _candidates(
         described[parent_key] = (
             f"Store parent, owned: {owned}" if owned else "Store parent, not in history"
         )
+    if row.get("category") in BASE_GAME_OWNER_CATEGORIES:
+        return "; ".join(f"{candidate} ({note})" for candidate, note in described.items())
     for owner_key in owners_by_title_id.get(title_id(key), []):
         if owner_key != key and owner_key not in described:
             described[owner_key] = f"same title ID, owned: {titles[owner_key]}"
     return "; ".join(f"{candidate} ({note})" for candidate, note in described.items())
+
+
+def _possible_duplicates(enriched_rows: list[dict[str, str]]) -> dict[str, list[str]]:
+    """Return, per product key, owned games that may be the same game.
+
+    Games match when their names agree once edition wording such as
+    "Remastered" or "Director's Cut" is ignored but they are still counted as
+    different games, so a ``game`` decision would merge their totals.
+    """
+    groups: dict[str, dict[str, set[str]]] = {}
+    for row in enriched_rows:
+        key = row.get("product_key", "")
+        if not key or row.get("category") not in GAME_CATEGORIES:
+            continue
+        game = row.get("game") or clean_game_title(row.get("product", ""))
+        groups.setdefault(loose_game_key(game), {}).setdefault(game, set()).add(key)
+
+    duplicates: dict[str, list[str]] = {}
+    for loose_key, games in groups.items():
+        if not loose_key or len(games) < 2:
+            continue
+        for game, keys in games.items():
+            others = sorted(other for other in games if other != game)
+            for key in keys:
+                duplicates[key] = others
+    return duplicates
 
 
 def seed_overrides(
@@ -288,21 +319,32 @@ def seed_overrides(
         if row.get("category") in BASE_GAME_OWNER_CATEGORIES and title_id(key):
             owners_by_title_id.setdefault(title_id(key), []).append(key)
 
+    duplicates = _possible_duplicates(enriched_rows)
+
     added = 0
     already_listed: set[str] = set()
     seen: set[str] = set()
     for row in enriched_rows:
         key = row.get("product_key", "")
-        reason = _curation_reason(row)
+        others = duplicates.get(key, [])
+        reason = _curation_reason(row) or (
+            "duplicate: may be the same game as " + "; ".join(others)
+            if others
+            else ""
+        )
         if not key or not reason or key in seen:
             continue
         seen.add(key)
+        candidates = _candidates(row, titles, owners_by_title_id)
+        if others:
+            games = "; ".join(f"game: {other}" for other in others)
+            candidates = f"{candidates}; {games}" if candidates else games
         reference = {
             "product_key": key,
             "product": row.get("product", ""),
             "current_category": row.get("category", ""),
             "reason": reason,
-            "candidates": _candidates(row, titles, owners_by_title_id),
+            "candidates": candidates,
         }
         if key in rows_by_key:
             already_listed.add(key)

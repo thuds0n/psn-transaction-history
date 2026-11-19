@@ -266,7 +266,7 @@ def curate(
     )
     typer.echo(
         "Fill in category, base_game_key (a product_key from candidates or the "
-        "enriched CSV, or none) or base_game_title, then run enrich again."
+        "enriched CSV, or none), base_game_title or game, then run enrich again."
     )
 
 if __name__ == "__main__":

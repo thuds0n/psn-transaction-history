@@ -12,7 +12,7 @@ from psn_transactions import export as csv_export
 from psn_transactions import overrides
 from psn_transactions.cli import app
 from psn_transactions.errors import PSNTransactionsError
-from psn_transactions.relationships import link_owned_base_games
+from psn_transactions.relationships import assign_games, link_owned_base_games
 
 
 BASE_KEY = "en-us|EX0001-CUSA00001_00-BASEGAME"
@@ -533,3 +533,86 @@ class TestSeedOverrides:
 
         assert overrides.seed_overrides(enriched_csv) == (0, 3)
         assert isolated_overrides_file.stat().st_mtime_ns == before
+
+
+class TestGames:
+    def game_rows(self):
+        return [
+            {"order_item_id": "PS4", "product_key": "en-us|EX-CUSA00001_00-GAME",
+             "product": "Dead Cells (PS4® & PS5®)", "category": "Full Game"},
+            {"order_item_id": "PS5", "product_key": "en-us|EX-PPSA00001_00-GAME",
+             "product": "Dead Cells (PS4® & PS5®)", "category": "Full Game"},
+            {"order_item_id": "DLC", "product_key": "en-us|EX-PPSA00001_00-DLC",
+             "product": "Dead Cells: The Queen and the Sea", "category": "DLC / Add-on",
+             "relationship_type": "add_on_of", "base_game_order_item_id": "PS5"},
+            {"order_item_id": "LOOSE", "product_key": "en-us|EX-CUSA00009_00-DLC",
+             "product": "Extra Pack", "category": "DLC / Add-on",
+             "relationship_type": "add_on_of", "base_game_title": "BLOODBORNE™"},
+            {"order_item_id": "BB", "product_key": "en-us|EX-CUSA00002_00-BB",
+             "product": "Bloodborne™", "category": "Full Game"},
+            {"order_item_id": "SUB", "product_key": "en-us|EX-PLUS",
+             "product": "PlayStation Plus 1 Month", "category": "Subscription"},
+        ]
+
+    def test_games_group_copies_and_add_ons(self):
+        rows = self.game_rows()
+
+
+        assign_games(rows, {})
+
+        games = {row["order_item_id"]: row["game"] for row in rows}
+        assert games["PS4"] == games["PS5"] == games["DLC"] == "Dead Cells"
+        # An unlinked add-on takes its base title, spelt like the owned game.
+        assert games["LOOSE"] == games["BB"] == "Bloodborne"
+        assert games["SUB"] == ""
+
+    def test_manual_game_carries_to_linked_add_ons(self):
+        rows = self.game_rows()
+
+        assign_games(rows, {"en-us|EX-PPSA00001_00-GAME": "Dead Cells PS5"})
+
+        games = {row["order_item_id"]: row["game"] for row in rows}
+        assert games["PS5"] == games["DLC"] == "Dead Cells PS5"
+        assert games["PS4"] == "Dead Cells"
+
+    def test_game_only_decision_is_loaded(self, isolated_overrides_file):
+        write_overrides(
+            isolated_overrides_file,
+            [{"product_key": "en-us|EX0001-A", "game": "Nioh"}],
+        )
+
+        assert overrides.load_overrides()["en-us|EX0001-A"]["game"] == "Nioh"
+
+    def test_curate_suggests_editions_of_the_same_game(
+        self, tmp_path, isolated_overrides_file
+    ):
+        enriched = tmp_path / "enriched.csv"
+        with enriched.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(
+                file, fieldnames=["product_key", "product", "category", "game"]
+            )
+            writer.writeheader()
+            writer.writerows(
+                [
+                    {"product_key": "en-us|EX-CUSA00001_00-NIOH", "product": "Nioh",
+                     "category": "Full Game", "game": "Nioh"},
+                    {"product_key": "en-us|EX-PPSA00002_00-NIOH",
+                     "product": "Nioh Remastered – The Complete Edition",
+                     "category": "Full Game",
+                     "game": "Nioh Remastered – The Complete Edition"},
+                    {"product_key": "en-us|EX-CUSA00003_00-DOOM", "product": "DOOM",
+                     "category": "Full Game", "game": "DOOM"},
+                    {"product_key": "en-us|EX-CUSA00004_00-DOOM2",
+                     "product": "DOOM II (Classic)", "category": "Full Game",
+                     "game": "DOOM II (Classic)"},
+                ]
+            )
+
+        overrides.seed_overrides(enriched)
+
+        with isolated_overrides_file.open(newline="", encoding="utf-8") as file:
+            seeded = {row["product_key"]: row for row in csv.DictReader(file)}
+        assert set(seeded) == {"en-us|EX-CUSA00001_00-NIOH", "en-us|EX-PPSA00002_00-NIOH"}
+        nioh = seeded["en-us|EX-CUSA00001_00-NIOH"]
+        assert nioh["reason"].startswith("duplicate: may be the same game as Nioh Remastered")
+        assert nioh["candidates"] == "game: Nioh Remastered – The Complete Edition"

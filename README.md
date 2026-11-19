@@ -190,7 +190,8 @@ with owner-only permissions. The command can be repeated after each export:
 your decisions and any extra columns are never changed, and the reference
 columns of products still needing a decision are refreshed. Undecided products
 are listed first, grouped by reason: conflicts (several Store parents), then
-unresolved add-ons (no Store parent), then unclassified products.
+unresolved add-ons (no Store parent), then possible duplicate games, then
+unclassified products.
 
 Open the file in a spreadsheet and fill in any of the decision columns:
 
@@ -199,13 +200,16 @@ Open the file in a spreadsheet and fill in any of the decision columns:
 | `category` | Replacement category, such as `Full Game` or `DLC / Add-on` |
 | `base_game_key` | The base game's `product_key`, copied from the enriched CSV, or `none` for no base game |
 | `base_game_title` | The base game's title, when it has no `product_key` (for example, a disc purchase) |
+| `game` | The game this purchase counts towards, to merge copies or editions bought separately |
 | `notes` | Your evidence; shown as `relationship_evidence` |
 
 `product_key`, `product`, `current_category`, `reason` and `candidates` are for
 reference. `candidates` lists possible base games with a note on each: the
 Store parents of a conflict, and owned games or bundles with the same title ID
 (such as `CUSA01234`). Same-title-ID matches are suggestions only; check them
-before copying a key into `base_game_key`.
+before copying a key into `base_game_key`. A possible duplicate is an owned
+game whose name matches another once edition wording such as "Remastered" or
+"Director's Cut" is ignored; give both the same `game` to total them together.
 Run `enrich` again to apply the decisions. Manual decisions always take
 precedence over Store evidence and have a `classification_source` or
 `relationship_source` of `manual` and a `relationship_status` of `manual`.
@@ -272,6 +276,7 @@ lookups. Pressing Control-C saves completed results before the command exits.
 | `base_game_ownership` | For add-ons with a base game: `paid`, `free`, or `not_in_history` |
 | `base_game_match` | `product` when the base game itself was purchased, `edition` when an owned edition or bundle names it as its parent, or `title` for a manual title-only decision |
 | `base_game_order_item_id` | `order_item_id` of the purchase that owns the base game; with `--paid-only` alone, a zero-cost owner is not itself in the output |
+| `game` | The game a purchase counts towards: a manual `game` decision, else the base game an add-on links to, else the product name without ™/® symbols or "PS4 & PS5" tags. Blank for subscriptions, promotions and wallet top-ups |
 | `inclusion_reason` | With `--paid-only`: `paid`, or `base_game_reference` for a zero-cost base game added by `--include-base-games` |
 | `enrichment_status` | Whether Store metadata succeeded, was unavailable, or failed |
 | `enrichment_detail` | Concise lookup outcome or failure detail, without response bodies |

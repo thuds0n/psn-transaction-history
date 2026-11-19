@@ -344,3 +344,71 @@ def missing_base_game_keys(rows: list[dict]) -> set[str]:
         if row.get("base_game_ownership") == "not_in_history"
         and row.get("base_game_key")
     }
+
+
+# Categories that are games in their own right, so a game name can come from
+# the product name. Add-ons take the name of their base game instead.
+GAME_CATEGORIES = {"Full Game", "Bundle", "Other"}
+# Rows that belong to a game; subscriptions, promotions and wallet top-ups do not.
+_GAME_ROW_CATEGORIES = GAME_CATEGORIES | {"DLC / Add-on", "In-Game Currency", "Pre-order"}
+_PLATFORM_TAG = re.compile(
+    r"\s*\(?\bPS4\s*(?:&|and)\s*PS5\b\)?|\s+for\s+PS5\b", re.IGNORECASE
+)
+_EDITION_WORDS = re.compile(
+    r"\b(?:remastered|director.?s cut|(?:the )?complete edition|"
+    r"(?:digital )?deluxe edition|game of the year edition|goty|"
+    r"special edition|enhanced edition|definitive edition|digital edition|"
+    r"standard edition|classic edition|gold edition|premium edition|"
+    r"cross-gen bundle(?: edition)?|collection)\b",
+    re.IGNORECASE,
+)
+
+
+def clean_game_title(value: str) -> str:
+    """Return a display name for a game without symbols or platform tags."""
+    cleaned = re.sub(r"[™®©]", "", value or "")
+    cleaned = _PLATFORM_TAG.sub("", cleaned)
+    return " ".join(cleaned.split()).strip(" -:")
+
+
+def loose_game_key(value: str) -> str:
+    """Return a key that ignores edition wording, for suggesting merges only."""
+    cleaned = _EDITION_WORDS.sub("", clean_game_title(value).replace("–", "-"))
+    return " ".join(cleaned.casefold().split()).strip(" -:")
+
+
+def assign_games(rows: list[dict], game_overrides: dict[str, str]) -> None:
+    """Set each row's ``game``: a manual name, else its base game, else itself.
+
+    Add-ons linked to an owned purchase share that purchase's game, so a manual
+    name on a base game carries to its add-ons. Names that differ only in
+    letter case are shown with the spelling of an owned game where one exists.
+    """
+    by_item = {row.get("order_item_id"): row for row in rows if row.get("order_item_id")}
+
+    def own_name(row: dict) -> str:
+        manual = game_overrides.get(row.get("product_key") or "")
+        if manual:
+            return manual
+        if row.get("category") not in _GAME_ROW_CATEGORIES:
+            return ""
+        if row.get("relationship_type") == "add_on_of":
+            owner = by_item.get(row.get("base_game_order_item_id"))
+            if owner is not None and owner is not row:
+                return own_name(owner)
+            if row.get("base_game_title"):
+                return clean_game_title(row["base_game_title"])
+        return clean_game_title(row.get("product") or "")
+
+    names = {id(row): own_name(row) for row in rows}
+    spelling: dict[str, str] = {}
+    for row in rows:
+        name = names[id(row)]
+        if not name:
+            continue
+        key = name.casefold()
+        preferred = row.get("category") in GAME_CATEGORIES
+        if key not in spelling or (preferred and not spelling[key][1]):
+            spelling[key] = (name, preferred)
+    for row in rows:
+        row["game"] = spelling[names[id(row)].casefold()][0] if names[id(row)] else ""
