@@ -10,6 +10,11 @@ from pathlib import Path
 
 from psn_transactions.errors import PSNTransactionsError
 from psn_transactions.paths import app_dir
+from psn_transactions.relationships import (
+    BASE_GAME_OWNER_CATEGORIES,
+    conflict_parent_ids,
+    title_id,
+)
 from psn_transactions.storage import (
     atomic_write_csv,
     secure_private_directory,
@@ -21,7 +26,13 @@ OVERRIDE_SOURCE = "manual"
 NO_BASE_GAME = "none"
 
 # Reference columns help decide; only the decision columns are applied.
-REFERENCE_FIELDS = ["product_key", "product", "current_category", "reason"]
+REFERENCE_FIELDS = [
+    "product_key",
+    "product",
+    "current_category",
+    "reason",
+    "candidates",
+]
 DECISION_FIELDS = ["category", "base_game_key", "base_game_title", "notes"]
 OVERRIDE_FIELDS = REFERENCE_FIELDS + DECISION_FIELDS
 
@@ -190,11 +201,56 @@ def _curation_reason(row: dict[str, str]) -> str:
     return ""
 
 
+# Conflicts list their Store parents, so they are quickest to decide; products
+# the Store no longer describes need the most outside research.
+_REASON_ORDER = {"conflict": 0, "unresolved": 1, "unclassified": 2}
+
+
+def _sort_key(row: dict[str, str]) -> tuple:
+    decided = any(
+        (row.get(field) or "").strip()
+        for field in ("category", "base_game_key", "base_game_title")
+    )
+    kind = (row.get("reason") or "").partition(":")[0]
+    return (
+        decided,
+        _REASON_ORDER.get(kind, len(_REASON_ORDER)),
+        (row.get("product") or "").casefold(),
+        row.get("product_key") or "",
+    )
+
+
+def _candidates(
+    row: dict[str, str],
+    titles: dict[str, str],
+    owners_by_title_id: dict[str, list[str]],
+) -> str:
+    """Describe possible base games: Store parents, then owned same-title games."""
+    key = row.get("product_key", "")
+    locale = key.partition("|")[0]
+    described: dict[str, str] = {}
+    for parent_id in conflict_parent_ids(row.get("relationship_evidence", "")):
+        parent_key = f"{locale}|{parent_id}"
+        owned = titles.get(parent_key)
+        described[parent_key] = (
+            f"Store parent, owned: {owned}" if owned else "Store parent, not in history"
+        )
+    for owner_key in owners_by_title_id.get(title_id(key), []):
+        if owner_key != key and owner_key not in described:
+            described[owner_key] = f"same title ID, owned: {titles[owner_key]}"
+    return "; ".join(f"{candidate} ({note})" for candidate, note in described.items())
+
+
 def seed_overrides(
     enriched_csv: Path,
     path: Path | None = None,
 ) -> tuple[int, int]:
-    """Add products needing a decision; return added and already-listed counts."""
+    """Add products needing a decision; return added and already-listed counts.
+
+    Reference columns of undecided products are refreshed from the enriched
+    CSV, and the file is sorted with undecided products first, grouped by
+    reason. Decision columns are never changed.
+    """
     path = path or OVERRIDES_FILE
     try:
         with enriched_csv.open(newline="", encoding="utf-8-sig") as file:
@@ -211,41 +267,58 @@ def seed_overrides(
         ) from exc
 
     fieldnames = list(OVERRIDE_FIELDS)
+    existing_fields: list[str] = []
     existing_rows: list[dict[str, str]] = []
     if path.exists():
         existing_fields, existing_rows = _read_rows(path)
         fieldnames += [field for field in existing_fields if field not in fieldnames]
         load_overrides(path)  # Refuse to extend a file that does not validate.
-    listed = {(row.get("product_key") or "").strip() for row in existing_rows}
+    original_rows = [dict(row) for row in existing_rows]
+    rows_by_key = {
+        (row.get("product_key") or "").strip(): row for row in existing_rows
+    }
 
-    added: list[dict[str, str]] = []
+    titles: dict[str, str] = {}
+    owners_by_title_id: dict[str, list[str]] = {}
+    for row in enriched_rows:
+        key = row.get("product_key", "")
+        if not key or key in titles:
+            continue
+        titles[key] = row.get("product", "")
+        if row.get("category") in BASE_GAME_OWNER_CATEGORIES and title_id(key):
+            owners_by_title_id.setdefault(title_id(key), []).append(key)
+
+    added = 0
     already_listed: set[str] = set()
+    seen: set[str] = set()
     for row in enriched_rows:
         key = row.get("product_key", "")
         reason = _curation_reason(row)
-        if not key or not reason:
+        if not key or not reason or key in seen:
             continue
-        if key in listed:
-            if not any(item["product_key"] == key for item in added):
-                already_listed.add(key)
-            continue
-        listed.add(key)
-        added.append(
-            {
-                "product_key": key,
-                "product": row.get("product", ""),
-                "current_category": row.get("category", ""),
-                "reason": reason,
-            }
-        )
+        seen.add(key)
+        reference = {
+            "product_key": key,
+            "product": row.get("product", ""),
+            "current_category": row.get("category", ""),
+            "reason": reason,
+            "candidates": _candidates(row, titles, owners_by_title_id),
+        }
+        if key in rows_by_key:
+            already_listed.add(key)
+            rows_by_key[key].update(reference)
+        else:
+            added += 1
+            rows_by_key[key] = reference
 
-    if added or not path.exists():
+    rows = sorted(rows_by_key.values(), key=_sort_key)
+    if rows != original_rows or fieldnames != existing_fields:
         secure_private_directory(path.parent, "relationship overrides")
         atomic_write_csv(
             path,
-            existing_rows + added,
+            rows,
             fieldnames,
             description="relationship overrides",
         )
         secure_private_file(path, "relationship overrides")
-    return len(added), len(already_listed)
+    return added, len(already_listed)

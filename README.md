@@ -186,8 +186,11 @@ psn-transactions curate --input my_transactions_enriched.csv
 
 `curate` reads the enriched CSV and adds each product that still needs a
 decision to `~/.psn-transactions/relationship_overrides.csv`, which is created
-with owner-only permissions. Products already in the file are left untouched,
-so the command can be repeated after each export.
+with owner-only permissions. The command can be repeated after each export:
+your decisions and any extra columns are never changed, and the reference
+columns of products still needing a decision are refreshed. Undecided products
+are listed first, grouped by reason: conflicts (several Store parents), then
+unresolved add-ons (no Store parent), then unclassified products.
 
 Open the file in a spreadsheet and fill in any of the decision columns:
 
@@ -198,7 +201,11 @@ Open the file in a spreadsheet and fill in any of the decision columns:
 | `base_game_title` | The base game's title, when it has no `product_key` (for example, a disc purchase) |
 | `notes` | Your evidence; shown as `relationship_evidence` |
 
-`product_key`, `product`, `current_category` and `reason` are for reference.
+`product_key`, `product`, `current_category`, `reason` and `candidates` are for
+reference. `candidates` lists possible base games with a note on each: the
+Store parents of a conflict, and owned games or bundles with the same title ID
+(such as `CUSA01234`). Same-title-ID matches are suggestions only; check them
+before copying a key into `base_game_key`.
 Run `enrich` again to apply the decisions. Manual decisions always take
 precedence over Store evidence and have a `classification_source` or
 `relationship_source` of `manual` and a `relationship_status` of `manual`.

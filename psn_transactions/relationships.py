@@ -45,6 +45,24 @@ def product_key(locale: str, product_id: str) -> str:
     return f"{locale.lower()}|{_sku_base(product_id)}"
 
 
+_CONFLICT_PARENTS = re.compile(r"parent_links contains \d+ products: ([^;]+)")
+_TITLE_ID = re.compile(r"-([A-Z]{4}\d{5})_\d{2}-")
+
+
+def conflict_parent_ids(evidence: str) -> list[str]:
+    """Return the Store parent product IDs listed in conflict evidence."""
+    match = _CONFLICT_PARENTS.search(evidence)
+    if not match:
+        return []
+    return [value.strip() for value in match.group(1).split(",") if value.strip()]
+
+
+def title_id(key: str) -> str:
+    """Return the platform title ID (such as CUSA01234) in a product key."""
+    match = _TITLE_ID.search(key)
+    return match.group(1) if match else ""
+
+
 def _token(info: dict, field: str) -> str:
     return normalise_token(str(info.get(field) or ""))
 
@@ -238,7 +256,7 @@ def relationship_fields(
     return fields
 
 
-_BASE_GAME_OWNER_CATEGORIES = {"Full Game", "Bundle"}
+BASE_GAME_OWNER_CATEGORIES = {"Full Game", "Bundle"}
 _EDITION_RELATIONSHIP_TYPES = {"store_parent", "edition_of"}
 
 
@@ -269,7 +287,7 @@ def _owned_base_games(rows: list[dict]) -> tuple[dict[str, tuple], dict[str, tup
             row.get("product_key") or "",
             (not paid, 0, row.get("date") or "", item_id, ownership, "product"),
         )
-        if row.get("category") in _BASE_GAME_OWNER_CATEGORIES:
+        if row.get("category") in BASE_GAME_OWNER_CATEGORIES:
             offer(
                 _title_key(row.get("product") or ""),
                 (not paid, 0, row.get("date") or "", item_id, ownership, "title"),
@@ -277,7 +295,7 @@ def _owned_base_games(rows: list[dict]) -> tuple[dict[str, tuple], dict[str, tup
             )
         if (
             row.get("relationship_type") in _EDITION_RELATIONSHIP_TYPES
-            and row.get("category") in _BASE_GAME_OWNER_CATEGORIES
+            and row.get("category") in BASE_GAME_OWNER_CATEGORIES
         ):
             offer(
                 row.get("base_game_key") or "",

@@ -262,11 +262,11 @@ def curate(
         raise typer.Exit(code=1)
     typer.echo(
         f"Added {added} products needing a decision to {overrides.OVERRIDES_FILE}; "
-        f"{already_listed} were already listed."
+        f"{already_listed} were already listed and refreshed."
     )
     typer.echo(
-        "Fill in category, base_game_key (a product_key, or none) or "
-        "base_game_title, then run enrich again."
+        "Fill in category, base_game_key (a product_key from candidates or the "
+        "enriched CSV, or none) or base_game_title, then run enrich again."
     )
 
 if __name__ == "__main__":

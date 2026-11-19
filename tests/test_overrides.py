@@ -367,7 +367,7 @@ class TestOverridesInEnrichment:
         again = CliRunner().invoke(app, ["curate", "--input", str(output_path)])
 
         assert "Added 0 products" in again.output
-        assert "2 were already listed" in again.output
+        assert "2 were already listed and refreshed" in again.output
         assert overrides.load_overrides()[rows[0]["product_key"]]["base_game_key"] == BASE_KEY
 
     def test_invalid_overrides_stop_enrichment(
@@ -382,3 +382,154 @@ class TestOverridesInEnrichment:
         with pytest.raises(PSNTransactionsError, match="unknown category"):
             run()
         assert not output_path.exists()
+
+
+class TestSeedOverrides:
+    ENRICHED_FIELDS = [
+        "product_key",
+        "product",
+        "category",
+        "relationship_status",
+        "relationship_evidence",
+        "enrichment_status",
+    ]
+
+    def write_enriched(self, path, rows):
+        with path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=self.ENRICHED_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def read_seeded(self, path):
+        with path.open(newline="", encoding="utf-8") as file:
+            return list(csv.DictReader(file))
+
+    @pytest.fixture
+    def enriched_csv(self, tmp_path):
+        path = tmp_path / "enriched.csv"
+        self.write_enriched(
+            path,
+            [
+                {
+                    "product_key": BASE_KEY,
+                    "product": "Base Game",
+                    "category": "Full Game",
+                    "relationship_status": "not_applicable",
+                },
+                {
+                    "product_key": "en-us|EX0001-CUSA00001_00-ZEXPANSION",
+                    "product": "Zed Expansion",
+                    "category": "DLC / Add-on",
+                    "relationship_status": "unresolved",
+                    "relationship_evidence": (
+                        "content_type=ADD_ON; Store response contains no parent_links"
+                    ),
+                },
+                {
+                    "product_key": "en-us|EX0001-CUSA00009_00-DELISTED",
+                    "product": "Alpha Delisted",
+                    "category": "Other",
+                    "enrichment_status": "not_found",
+                },
+                {
+                    "product_key": "en-us|EX0001-CUSA00005_00-BUNDLE",
+                    "product": "Mega Bundle",
+                    "category": "Bundle",
+                    "relationship_status": "conflict",
+                    "relationship_evidence": (
+                        "parent_links contains 2 products: "
+                        "EX0001-CUSA00001_00-BASEGAME,EX0001-PPSA00001_00-PS5GAME; "
+                        "product is not explicitly classified as add-on content"
+                    ),
+                },
+            ],
+        )
+        return path
+
+    def test_lists_candidates_and_sorts_by_reason(
+        self, enriched_csv, isolated_overrides_file
+    ):
+        assert overrides.seed_overrides(enriched_csv) == (3, 0)
+
+        rows = self.read_seeded(isolated_overrides_file)
+        assert [row["product"] for row in rows] == [
+            "Mega Bundle",
+            "Zed Expansion",
+            "Alpha Delisted",
+        ]
+        assert rows[0]["candidates"] == (
+            f"{BASE_KEY} (Store parent, owned: Base Game); "
+            "en-us|EX0001-PPSA00001_00-PS5GAME (Store parent, not in history)"
+        )
+        assert rows[1]["candidates"] == (
+            f"{BASE_KEY} (same title ID, owned: Base Game)"
+        )
+        assert rows[2]["candidates"] == ""
+
+    def test_refreshes_reference_columns_without_touching_decisions(
+        self, enriched_csv, isolated_overrides_file
+    ):
+        # A file written before the candidates column existed, in old order.
+        isolated_overrides_file.parent.mkdir(parents=True, exist_ok=True)
+        with isolated_overrides_file.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=[
+                    "product_key",
+                    "product",
+                    "current_category",
+                    "reason",
+                    "category",
+                    "base_game_key",
+                    "base_game_title",
+                    "notes",
+                    "my_column",
+                ],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "product_key": "en-us|EX0001-CUSA00009_00-DELISTED",
+                    "product": "Alpha Delisted",
+                    "reason": "unclassified",
+                    "category": "DLC / Add-on",
+                    "base_game_key": BASE_KEY,
+                    "notes": "Checked PSNProfiles",
+                    "my_column": "keep me",
+                }
+            )
+            writer.writerow(
+                {
+                    "product_key": "en-us|EX0001-CUSA00001_00-ZEXPANSION",
+                    "product": "Old name",
+                    "reason": "old reason",
+                }
+            )
+
+        assert overrides.seed_overrides(enriched_csv) == (1, 2)
+
+        rows = {row["product_key"]: row for row in self.read_seeded(
+            isolated_overrides_file
+        )}
+        assert [row["product"] for row in rows.values()] == [
+            "Mega Bundle",
+            "Zed Expansion",
+            "Alpha Delisted",
+        ]
+        expansion = rows["en-us|EX0001-CUSA00001_00-ZEXPANSION"]
+        assert expansion["reason"].startswith("unresolved: content_type=ADD_ON")
+        assert "same title ID" in expansion["candidates"]
+        decided = rows["en-us|EX0001-CUSA00009_00-DELISTED"]
+        assert decided["category"] == "DLC / Add-on"
+        assert decided["base_game_key"] == BASE_KEY
+        assert decided["notes"] == "Checked PSNProfiles"
+        assert decided["my_column"] == "keep me"
+
+    def test_unchanged_file_is_not_rewritten(
+        self, enriched_csv, isolated_overrides_file
+    ):
+        overrides.seed_overrides(enriched_csv)
+        before = isolated_overrides_file.stat().st_mtime_ns
+
+        assert overrides.seed_overrides(enriched_csv) == (0, 3)
+        assert isolated_overrides_file.stat().st_mtime_ns == before
