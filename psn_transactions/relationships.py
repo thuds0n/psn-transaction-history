@@ -30,7 +30,7 @@ _SUBTYPE_NAMES = {
 _RELATIONSHIP_CATEGORIES = {"DLC / Add-on", "In-Game Currency"}
 # Store records for recurring subscriptions can carry add-on content types,
 # but a subscription renewal is never content that belongs to a base game.
-_NON_RELATIONSHIP_CATEGORIES = {"Subscription"}
+NON_RELATIONSHIP_CATEGORIES = {"Subscription"}
 _STORE_RESULT_STATUSES = {"success", "stale_cache"}
 
 
@@ -166,7 +166,7 @@ def relationship_fields(
         "relationship_source": "",
         "relationship_evidence": "",
     }
-    if category in _NON_RELATIONSHIP_CATEGORIES:
+    if category in NON_RELATIONSHIP_CATEGORIES:
         fields.update(
             {
                 "add_on_subtype": "",

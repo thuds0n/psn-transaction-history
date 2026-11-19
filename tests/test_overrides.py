@@ -150,6 +150,38 @@ class TestApplyOverrides:
         assert fields["relationship_source"] == "manual"
         assert fields["base_game_key"] == ""
 
+    @pytest.mark.parametrize(
+        ("base_key", "base_title"), [(BASE_KEY, ""), ("", "Example Game")]
+    )
+    def test_subscription_base_game_is_ignored_and_reported(self, base_key, base_title):
+        fields = store_fields(relationship_status="not_applicable")
+
+        ignored = overrides.apply_relationship_override(
+            fields,
+            {"category": "", "base_game_key": base_key, "base_game_title": base_title, "notes": ""},
+            "Subscription",
+        )
+
+        assert ignored is True
+        assert fields["base_game_key"] == ""
+        assert fields["base_game_title"] == ""
+        assert fields["relationship_type"] == ""
+        assert fields["relationship_status"] == "not_applicable"
+        assert fields["relationship_source"] == "manual"
+        assert fields["relationship_evidence"].startswith(overrides.IGNORED_BASE_GAME)
+
+    def test_subscription_with_no_base_game_is_not_reported(self):
+        fields = store_fields(relationship_status="not_applicable")
+
+        ignored = overrides.apply_relationship_override(
+            fields,
+            {"category": "", "base_game_key": "none", "base_game_title": "", "notes": ""},
+            "Subscription",
+        )
+
+        assert ignored is False
+        assert fields["relationship_status"] == "not_applicable"
+
     def test_non_add_on_manual_link_is_an_edition(self):
         fields = store_fields(relationship_status="not_applicable")
         overrides.apply_relationship_override(
@@ -314,6 +346,33 @@ class TestOverridesInEnrichment:
         assert delisted["base_game_title"] == "Disc Only Game"
         assert delisted["base_game_ownership"] == "not_in_history"
         assert "applied: 2; not matched to any output row: 1" in capsys.readouterr().out
+
+    def test_subscription_base_game_is_ignored_with_a_warning(
+        self, enrich_environment, isolated_overrides_file, capsys
+    ):
+        run, _output_path = enrich_environment
+        write_overrides(
+            isolated_overrides_file,
+            [
+                {
+                    "product_key": "en-us|EX0001-CUSA00002_00-MYSTERY",
+                    "category": "Subscription",
+                    "base_game_key": BASE_KEY,
+                    "game": "Example Game",
+                }
+            ],
+        )
+
+        rows = run()
+
+        mystery = rows["ITEM-MYSTERY"]
+        assert mystery["category"] == "Subscription"
+        assert mystery["base_game_key"] == ""
+        assert mystery["base_game_order_item_id"] == ""
+        assert mystery["relationship_evidence"].startswith("base game ignored")
+        assert mystery["game"] == "Example Game"
+        output = " ".join(capsys.readouterr().out.split())
+        assert "Manual base games ignored for 1 subscription product(s)" in output
 
     def test_paid_only_excludes_free_base_games_unless_requested(
         self, enrich_environment, isolated_overrides_file

@@ -4,6 +4,16 @@ All notable changes to this project are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/); while the version is below 1.0,
 a minor bump may add or change CSV columns.
 
+## [0.2.1] - 2026-11-20
+
+### Fixed
+
+- A manual `base_game_key` or `base_game_title` on a subscription was kept in
+  the base-game columns but never linked, leaving a half-linked row with no
+  warning. It is now ignored explicitly: `enrich` prints how many subscription
+  products were affected, and their `relationship_evidence` explains that
+  subscriptions never link to a base game and that `game` should be used.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
@@ -39,4 +49,5 @@ a minor bump may add or change CSV columns.
 Untagged baseline: login, HTTP and browser fetch, date ranges, CSV export and
 Store-enriched export.
 
+[0.2.1]: https://github.com/thuds0n/psn-transaction-history/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/thuds0n/psn-transaction-history/compare/0f79397...v0.2.0

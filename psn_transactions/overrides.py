@@ -13,6 +13,7 @@ from psn_transactions.paths import app_dir
 from psn_transactions.relationships import (
     BASE_GAME_OWNER_CATEGORIES,
     GAME_CATEGORIES,
+    NON_RELATIONSHIP_CATEGORIES,
     clean_game_title,
     conflict_parent_ids,
     loose_game_key,
@@ -27,6 +28,8 @@ from psn_transactions.storage import (
 OVERRIDES_FILE = app_dir() / "relationship_overrides.csv"
 OVERRIDE_SOURCE = "manual"
 NO_BASE_GAME = "none"
+# Evidence prefix for a base game given where one can never apply.
+IGNORED_BASE_GAME = "base game ignored"
 
 # Reference columns help decide; only the decision columns are applied.
 REFERENCE_FIELDS = [
@@ -154,14 +157,31 @@ def apply_relationship_override(
     fields: dict[str, str],
     override: dict[str, str] | None,
     category: str,
-) -> None:
-    """Replace Store relationship fields with a manual base-game decision."""
+) -> bool:
+    """Replace Store relationship fields with a manual base-game decision.
+
+    Returns True when a base game was given for a category that never links
+    to one, such as a subscription, so the caller can report it.
+    """
     if not override:
-        return
+        return False
     base_key = override["base_game_key"]
     base_title = override["base_game_title"]
     evidence = override["notes"] or "relationship_overrides.csv"
 
+    if category in NON_RELATIONSHIP_CATEGORIES and (
+        base_title or (base_key and base_key != NO_BASE_GAME)
+    ):
+        fields.update(
+            {
+                "relationship_source": OVERRIDE_SOURCE,
+                "relationship_evidence": (
+                    f"{IGNORED_BASE_GAME}: {category} products never link to "
+                    "a base game; set game instead"
+                ),
+            }
+        )
+        return True
     if base_key == NO_BASE_GAME:
         fields.update(
             {
@@ -173,9 +193,9 @@ def apply_relationship_override(
                 "relationship_evidence": evidence,
             }
         )
-        return
+        return False
     if not base_key and not base_title:
-        return
+        return False
 
     if not base_title and base_key == fields.get("base_game_key"):
         base_title = fields.get("base_game_title", "")
@@ -191,6 +211,7 @@ def apply_relationship_override(
             "relationship_evidence": evidence,
         }
     )
+    return False
 
 
 def _curation_reason(row: dict[str, str]) -> str:

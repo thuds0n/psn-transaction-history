@@ -217,6 +217,11 @@ A title-only decision links to an owned game or bundle only when its product
 name matches that title exactly. Invalid rows stop the export with the row
 number, and the command reports how many decisions matched an output row.
 
+Subscriptions never link to a base game, so a `base_game_key` or
+`base_game_title` on one is ignored: `enrich` prints a warning and the row's
+`relationship_evidence` says so. Use `game` to count a subscription towards a
+game instead.
+
 ## CSV columns
 
 | Column | Description |

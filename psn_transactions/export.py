@@ -811,6 +811,18 @@ def _write_csv(
             f"Manual overrides — applied: {len(matched)}; "
             f"not matched to any output row: {len(overrides) - len(matched)}"
         )
+        ignored = {
+            row["product_key"]
+            for row in rows
+            if row.get("relationship_evidence", "").startswith(manual.IGNORED_BASE_GAME)
+        }
+        if ignored:
+            console.print(
+                f"[yellow]Manual base games ignored for {len(ignored)} "
+                "subscription product(s): subscriptions never link to a base "
+                "game. Clear base_game_key or base_game_title and set game "
+                "instead; affected rows say so in relationship_evidence.[/yellow]"
+            )
 
     fields = list(ENRICHED_CSV_FIELDS if enriched else CORE_CSV_FIELDS)
     if include_payment_details:
