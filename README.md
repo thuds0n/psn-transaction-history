@@ -350,7 +350,9 @@ SKU lookups are cached atomically in the owner-only file
 and source schema. A 404 is retried after seven days and a valid response with
 no useful metadata is retried after one day. Transient network, rate-limit, and
 Store server failures are not cached, so the next `enrich` run can retry them.
-Successful results are reused until `--refresh` is requested. If refresh fails
+Successful results are reused for 30 days, then looked up again on the next
+`enrich` run; `--refresh` repeats every lookup immediately. `--cache-only` still
+uses successful results older than 30 days. If a refresh fails
 temporarily, the successful cache record is preserved; a confirmed 404 or valid
 no-metadata response replaces it. Changing locale does not reuse metadata from
 another regional Store. Successful records written before relationship metadata

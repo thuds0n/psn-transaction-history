@@ -13,6 +13,14 @@ a minor bump may add or change CSV columns.
   of `DLC / Add-on`, without needing a manual override. The
   `classification_evidence` names the matched term.
 
+### Changed
+
+- Successful Store lookups in the SKU cache now expire after 30 days and are
+  looked up again on the next `enrich` run, so Store corrections (names,
+  classifications, parent links) are picked up without `--refresh`. If that
+  lookup fails temporarily, the cached metadata is kept and the row is marked
+  `stale_cache`. `--cache-only` still uses expired entries.
+
 ## [0.2.1] - 2026-11-20
 
 ### Fixed

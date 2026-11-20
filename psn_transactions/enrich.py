@@ -30,6 +30,9 @@ STORE_METADATA_SCHEMA_VERSION = 2
 CACHE_SOURCE = "playstation-store-chihiro"
 NOT_FOUND_CACHE_TTL = timedelta(days=7)
 NO_METADATA_CACHE_TTL = timedelta(days=1)
+# Store metadata (prices aside) changes rarely, but parent links, names and
+# classifications do get corrected, so successful lookups are refreshed monthly.
+SUCCESS_CACHE_TTL = timedelta(days=30)
 STORE_TIMEOUT_SECONDS = 10
 
 
@@ -46,6 +49,7 @@ class EnrichmentResult(TypedDict):
     detail: NotRequired[str]
     network_requested: NotRequired[bool]
     metadata_current: NotRequired[bool]
+    expired: NotRequired[bool]
 
 
 def _chihiro_url(sku_base: str) -> str:
@@ -230,6 +234,8 @@ def _cached_result(
     }
     if status == "success" and not metadata_current:
         result["metadata_current"] = False
+    if status == "success" and (age is None or age > SUCCESS_CACHE_TTL):
+        result["expired"] = True
     return result
 
 
@@ -573,7 +579,7 @@ def _lookup_sku(
     if not sku:
         return {"status": "missing_sku", "metadata": {}, "cached": False}
     cached = _cached_result(sku, cache)
-    if cached is not None:
+    if cached is not None and not cached.get("expired"):
         return cached
 
     result = _fetch_sku(sku, session=session)
@@ -612,11 +618,18 @@ def _enrich_skus(
                 cache,
                 allow_stale_metadata=True,
             )
+            # Cache-only mode still uses metadata that is merely past its
+            # refresh age: it is complete, just due for a recheck.
             if (
                 cached is not None
                 and cached.get("metadata_current", True)
+                and (
+                    not cached.get("expired")
+                    or cache_mode is CacheMode.ONLY
+                )
                 and cache_mode is not CacheMode.REFRESH
             ):
+                cached = {k: v for k, v in cached.items() if k != "expired"}
                 for sku in variants:
                     results[sku] = cached
                 progress.advance(task, len(variants))

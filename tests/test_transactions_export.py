@@ -2023,6 +2023,94 @@ class TestSerialEnrichment:
         assert results["SKU002"]["cached"] is False
         assert results["SKU002"]["detail"] == "No reusable cached metadata"
 
+    def _expired_success_cache(self, monkeypatch):
+        written = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        monkeypatch.setattr(store_enrich, "_utc_now", lambda: written)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001", cache, "success", {"content_type": "ADD_ON"}
+        )
+        later = written + store_enrich.SUCCESS_CACHE_TTL + timedelta(seconds=1)
+        monkeypatch.setattr(store_enrich, "_utc_now", lambda: later)
+        return cache
+
+    def test_successful_cache_within_ttl_is_reused(self, monkeypatch):
+        written = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        monkeypatch.setattr(store_enrich, "_utc_now", lambda: written)
+        cache = store_enrich._empty_cache()
+        store_enrich._record_cache_result(
+            "SKU001", cache, "success", {"content_type": "ADD_ON"}
+        )
+        within = written + store_enrich.SUCCESS_CACHE_TTL - timedelta(seconds=1)
+
+        result = store_enrich._cached_result("SKU001", cache, now=within)
+
+        assert result is not None and "expired" not in result
+
+    def test_expired_successful_cache_is_refetched(self, monkeypatch):
+        cache = self._expired_success_cache(monkeypatch)
+        calls = []
+
+        def fake_fetch(sku, session=None):
+            calls.append(sku)
+            return {
+                "status": "success",
+                "metadata": {"content_type": "FULL_GAME"},
+                "cached": False,
+            }
+
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+
+        results = store_enrich._enrich_skus({"SKU001"}, cache)
+
+        assert calls == ["SKU001"]
+        assert results["SKU001"]["metadata"]["content_type"] == "FULL_GAME"
+        record = cache["entries"][store_enrich._cache_key("SKU001")]
+        assert record["metadata"]["content_type"] == "FULL_GAME"
+
+    def test_expired_successful_cache_survives_temporary_failure(
+        self, monkeypatch
+    ):
+        cache = self._expired_success_cache(monkeypatch)
+        cached_record = dict(cache["entries"][store_enrich._cache_key("SKU001")])
+
+        def fake_fetch(sku, session=None):
+            return {
+                "status": "temporary_failure",
+                "metadata": {},
+                "cached": False,
+                "detail": "HTTP 503",
+            }
+
+        monkeypatch.setattr(store_enrich, "_store_session", self.FakeSession)
+        monkeypatch.setattr(store_enrich, "_fetch_sku", fake_fetch)
+
+        results = store_enrich._enrich_skus({"SKU001"}, cache)
+
+        assert results["SKU001"]["status"] == "stale_cache"
+        assert results["SKU001"]["metadata"] == {"content_type": "ADD_ON"}
+        assert cache["entries"][store_enrich._cache_key("SKU001")] == cached_record
+
+    def test_cache_only_reuses_expired_successful_cache(self, monkeypatch):
+        cache = self._expired_success_cache(monkeypatch)
+        monkeypatch.setattr(
+            store_enrich,
+            "_store_session",
+            lambda: (_ for _ in ()).throw(AssertionError("network session opened")),
+        )
+
+        results = store_enrich._enrich_skus(
+            {"SKU001"}, cache, cache_mode=store_enrich.CacheMode.ONLY
+        )
+
+        assert results["SKU001"] == {
+            "status": "success",
+            "metadata": {"content_type": "ADD_ON"},
+            "cached": True,
+            "detail": "",
+        }
+
     def test_interrupt_saves_completed_cache_progress(
         self, tmp_path, monkeypatch
     ):
