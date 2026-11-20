@@ -244,6 +244,32 @@ class TestClassify:
         assert source == "transaction"
         assert evidence == "sku_type=SUBSCRIPTION"
 
+    def test_add_on_with_billing_term_name_is_subscription(self):
+        category, is_ps_plus, source, evidence = _classify_detailed(
+            "Fortnite Crew - 1 Month",
+            "EP1464-PPSA01923_00-FSUB010000000000-E002",
+            item_total=1755,
+            item_original=1755,
+            info={"content_type": "ADD_ON"},
+        )
+        assert category == "Subscription"
+        assert is_ps_plus is None
+        assert source == "product_name"
+        assert evidence == 'content_type=ADD_ON; product name contains "1 Month"'
+
+    @pytest.mark.parametrize(
+        "name", ["Monthly Mega Pack", "Year of the Dragon Skin", "12 Monkeys Costume"]
+    )
+    def test_add_on_without_billing_term_stays_add_on(self, name):
+        category, _is_ps_plus, _source, _evidence = _classify_detailed(
+            name,
+            "EX0001-PPSA00001_00-EXAMPLE",
+            item_total=999,
+            item_original=999,
+            info={"content_type": "ADD_ON"},
+        )
+        assert category == "DLC / Add-on"
+
     def test_heuristic_classification_names_the_matching_evidence(self):
         category, is_ps_plus, source, evidence = _classify_detailed(
             "Example Season Pass",

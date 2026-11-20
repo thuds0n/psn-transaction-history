@@ -4,6 +4,15 @@ All notable changes to this project are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/); while the version is below 1.0,
 a minor bump may add or change CSV columns.
 
+## [Unreleased]
+
+### Fixed
+
+- In-game memberships sold as add-ons with a billing term in the name, such
+  as "Fortnite Crew - 1 Month", are now classified as `Subscription` instead
+  of `DLC / Add-on`, without needing a manual override. The
+  `classification_evidence` names the matched term.
+
 ## [0.2.1] - 2026-11-20
 
 ### Fixed

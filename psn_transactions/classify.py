@@ -4,6 +4,9 @@ import re
 from typing import Any
 
 
+# A billing term such as "1 Month", "12-Month" or "1 Year" in a product name.
+RECURRING_TERM_PATTERN = re.compile(r"\b\d+[- ]?(?:month|year)s?\b", re.IGNORECASE)
+
 ADD_ON_DISPLAY_TYPES = frozenset(
     {
         "ADD_ON",
@@ -126,6 +129,17 @@ def classify_detailed(
         )
 
     if content_type in {"ADDON", "ADD_ON", "ADD_ON_CONTENT", "DLC"}:
+        # Some in-game memberships (e.g. "Fortnite Crew - 1 Month") are sold
+        # as add-ons with no subscription metadata on the transaction; a
+        # billing-term name is the only signal that they recur.
+        term = RECURRING_TERM_PATTERN.search(name)
+        if term:
+            return (
+                "Subscription",
+                True if is_plus_name else None,
+                "product_name",
+                f'content_type={content_type}; product name contains "{term.group(0)}"',
+            )
         return (
             "DLC / Add-on",
             True if is_plus_name else None,
