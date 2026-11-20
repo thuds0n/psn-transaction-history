@@ -68,4 +68,4 @@ Store-enriched export.
 
 [0.2.2]: https://github.com/thuds0n/psn-transaction-history/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/thuds0n/psn-transaction-history/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/thuds0n/psn-transaction-history/compare/0f79397...v0.2.0
+[0.2.0]: https://github.com/thuds0n/psn-transaction-history/compare/6da9466...v0.2.0
