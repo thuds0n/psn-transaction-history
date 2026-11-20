@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/); while the version is below 1.0,
 a minor bump may add or change CSV columns.
 
-## [Unreleased]
+## [0.2.2] - 2026-11-20
 
 ### Fixed
 
@@ -66,5 +66,6 @@ a minor bump may add or change CSV columns.
 Untagged baseline: login, HTTP and browser fetch, date ranges, CSV export and
 Store-enriched export.
 
+[0.2.2]: https://github.com/thuds0n/psn-transaction-history/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/thuds0n/psn-transaction-history/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/thuds0n/psn-transaction-history/compare/0f79397...v0.2.0
